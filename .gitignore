@@ -1,0 +1,5 @@
+downloads/
+logs/
+data/
+.env.git
+*.log

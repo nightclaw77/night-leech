@@ -195,8 +195,8 @@ async def show_results(update, ctx, msg):
         return
     
     # Check if TV show
-    tv_items = [x for x in items if x.get('is_tv')]
-    other_items = [x for x in items if not x.get('is_tv')]
+    tv_items = [x for x in items if x.get('parsed', {}).get('type') == 'episode']
+    other_items = [x for x in items if x.get('parsed', {}).get('type') == 'movie']
     
     total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start = page * ITEMS_PER_PAGE
@@ -213,7 +213,7 @@ async def show_results(update, ctx, msg):
         # Group by quality
         quality_groups = defaultdict(list)
         for item in tv_items:
-            q = item.get('quality', 'Unknown')
+            q = item.get('parsed', {}).get('screen_size', 'Unknown')
             quality_groups[q].append(item)
         
         quality_order = {'2160p': 0, '4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 99}
@@ -232,11 +232,11 @@ async def show_results(update, ctx, msg):
                 seed = t.get('Seeders', '0')
                 
                 # S/E info
-                s = t.get('season')
-                e = t.get('episode')
+                s = t.get('parsed', {}).get('season')
+                e = t.get('parsed', {}).get('episode')
                 if s and e:
                     se_info = f" S{s}E{e}"
-                elif s and t.get('is_pack'):
+                elif s and t.get('parsed', {}).get('episode') is None and t.get('parsed', {}).get('season') is not None:
                     se_info = f" S{s} Pack"
                 else:
                     se_info = ""

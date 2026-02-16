@@ -1,0 +1,649 @@
+#!/usr/bin/env python3
+# Night Leech Bot - Complete TV Show Support v2
+
+import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
+from pathlib import Path
+from datetime import datetime
+from collections import defaultdict
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, InlineQueryHandler
+
+BOT_TOKEN = "8237711641:AAFACjgYYAJpV4oWa-aDoRcGwTipcOUFLyY"
+JACKETT_URL = "http://localhost:9117"
+JACKETT_API_KEY = "3kknp1d7trlr6tp95apmcwndu53d0cm9"
+QBITTORRENT_URL = "http://localhost:8083"
+FILE_SERVER_URL = "https://files.nightsub.ir"
+
+# Indexers - TV focused + Movies
+INDEXERS = [
+    ("torrentgalaxyclone", "TorrentGalaxy 🌐"),
+    ("subsplease", "SubsPlease 📺"),
+    ("eztv", "EZTV 📺"),
+    ("iptorrents", "IPTorrents 🔒"),
+]
+
+INDEXER_CONFIG = {
+    "torrentgalaxyclone": {"private": False, "seed_hours": 6},
+    "subsplease": {"private": False, "seed_hours": 6},
+    "eztv": {"private": False, "seed_hours": 6},
+    "iptorrents": {"private": True, "seed_hours": 336},
+}
+
+ITEMS_PER_PAGE = 5
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO,
+    handlers=[logging.FileHandler('/root/.openclaw/workspace/Night-Leech/logs/bot.log'), logging.StreamHandler()]
+)
+logger = logging.getLogger(__name__)
+
+def fmt_size(s):
+    try:
+        v = int(s)
+        if v >= 1073741824: return f"{v/1073741824:.1f}GB"
+        elif v >= 1048576: return f"{v/1048576:.1f}MB"
+        else: return f"{v/1024:.1f}KB"
+    except: return "?"
+
+def parse_torrent_title(title):
+    """Parse torrent title - improved for anime/TV"""
+    result = {
+        'season': None, 'episode': None, 'episodes': [], 
+        'quality': 'Unknown', 'is_tv': False, 
+        'is_full_season': False, 'clean_title': title
+    }
+    
+    # Quality first
+    quality_match = re.search(r'(4K|2160p|1080p|720p|480p|540p)', title, re.IGNORECASE)
+    if quality_match:
+        q = quality_match.group(1).upper()
+        result['quality'] = '4K' if q in ['2160P', '4K'] else q
+    
+    found_se = False
+    
+    # 1. S01E01 or S1E1
+    match = re.search(r'[Ss](\d+)[Ee](\d+)', title)
+    if match:
+        result['season'] = int(match.group(1))
+        result['episode'] = int(match.group(2))
+        result['episodes'] = [int(match.group(2))]
+        result['is_tv'] = True
+        found_se = True
+    
+    # 2. S01 E01 or S01-E01
+    if not found_se:
+        match = re.search(r'[Ss](\d+)[ ._-]+[Ee](\d+)', title)
+        if match:
+            result['season'] = int(match.group(1))
+            result['episode'] = int(match.group(2))
+            result['episodes'] = [int(match.group(2))]
+            result['is_tv'] = True
+            found_se = True
+    
+    # 3. - 54 (SubsPlease style episode number)
+    if not found_se:
+        match = re.search(r'- (\d{2,3})\s', title)
+        if match:
+            result['episode'] = int(match.group(1))
+            result['episodes'] = [int(match.group(1))]
+            result['is_tv'] = True
+    
+    # 4. Season X standalone
+    if not found_se:
+        match = re.search(r'[Ss]eason[ ._-]*(\d+)', title, re.IGNORECASE)
+        if match:
+            result['season'] = int(match.group(1))
+            result['is_tv'] = True
+            result['is_full_season'] = True
+            result['episodes'] = ['pack']
+            found_se = True
+    
+    # 5. S01 standalone (not followed by E)
+    if not found_se:
+        match = re.search(r'[Ss](\d+)(?:\s|$|\.|_|-(?![0-9]))', title)
+        if match:
+            s = int(match.group(1))
+            pos = match.end()
+            if pos >= len(title) or title[pos:pos+1].upper() != 'E':
+                result['season'] = s
+                result['is_tv'] = True
+                result['is_full_season'] = True
+                result['episodes'] = ['pack']
+                found_se = True
+    
+    # Try to infer season from episode for anime (rough estimate: 12-13 eps per season)
+    if result['is_tv'] and result['season'] is None and result['episode'] is not None:
+        # Estimate season from episode number (anime typically has 12-13 eps/season)
+        est_season = (result['episode'] - 1) // 13 + 1
+        result['season'] = est_season
+        logger.info(f"Inferred season {est_season} from episode {result['episode']} for: {title[:40]}")
+    
+    return result
+
+def parse_pubdate(pub):
+    try:
+        return datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M:%S") if pub else datetime.min
+    except: return datetime.min
+
+async def search_jackett(query, filter_idx=None):
+    """Search with TV show grouping support"""
+    try:
+        import urllib.parse
+        
+        results = []
+        indexers_to_search = [filter_idx] if filter_idx else [x[0] for x in INDEXERS]
+        
+        for idx_id in indexers_to_search:
+            try:
+                params = urllib.parse.urlencode({
+                    "apikey": JACKETT_API_KEY, 
+                    "t": "search", 
+                    "q": query,
+                    "sort": "date",
+                    "order": "desc"
+                })
+                url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results/torznab/api?{params}"
+                
+                async with aiohttp.ClientSession() as s:
+                    async with s.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
+                        if r.status == 200:
+                            text = await r.text()
+                            if '<item>' in text:
+                                root = ET.fromstring(text)
+                                for item in root.findall('.//item'):
+                                    title = item.find('title').text if item.find('title') is not None else "?"
+                                    comments = item.find('comments').text if item.find('comments') is not None else ""
+                                    magnet = comments if comments.startswith('magnet:') else ""
+                                    pub = item.find('pubDate').text if item.find('pubDate') is not None else ""
+                                    
+                                    parsed = parse_torrent_title(title)
+                                    
+                                    results.append({
+                                        "Title": title,
+                                        "Magnet": magnet,
+                                        "Size": item.find('size').text if item.find('size') is not None else "0",
+                                        "Seeders": item.find('.//torznab[@name="seeders"]').get('value') if item.find('.//torznab[@name="seeders"]') is not None else "0",
+                                        "Indexer": idx_id,
+                                        "PubDate": pub,
+                                        "ParsedDate": parse_pubdate(pub),
+                                        **parsed
+                                    })
+            except Exception as e:
+                logger.error(f"Jackett {idx_id}: {e}")
+        
+        if not results:
+            return None
+        
+        # Sort by date descending (newest first)
+        results.sort(key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
+        
+        return {"items": results}
+        
+    except Exception as e:
+        logger.error(f"Jackett error: {e}")
+    return None
+
+def get_indexer_info(idx_id):
+    for name, display in INDEXERS:
+        if name == idx_id:
+            return {"name": display, "id": name}
+    return {"name": idx_id, "id": idx_id}
+
+async def qbit_get_torrents():
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{QBITTORRENT_URL}/api/v2/torrents/info") as r:
+                if r.status == 200: return await r.json()
+    except: pass
+    return []
+
+async def qbit_get_files(hash):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.get(f"{QBITTORRENT_URL}/api/v2/torrents/files?hash={hash}") as r:
+                if r.status == 200: return await r.json()
+    except: pass
+    return []
+
+async def qbit_add_magnet(magnet):
+    try:
+        async with aiohttp.ClientSession() as s:
+            async with s.post(f"{QBITTORRENT_URL}/api/v2/torrents/add", data={"urls": magnet}) as r:
+                return r.status == 200
+    except: pass
+    return False
+
+async def get_imdb_posters(query):
+    try:
+        import urllib.parse
+        q = query.replace(' ', '%20').strip()
+        if not q: return None
+        url = f"https://v2.sg.media-imdb.com/suggestion/{q[0].lower()}/{q}.json"
+        async with aiohttp.ClientSession() as s:
+            async with s.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    d = await r.json()
+                    return [{"title": x.get("l", "?"), "year": x.get("y", "?"), "poster": x.get("i", {}).get("imageUrl", "")} for x in d.get("d", [])[:10]]
+    except: pass
+    return None
+
+def main_menu():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📥 Downloads & Files", callback_data="downloads")],
+        [InlineKeyboardButton("⚙️ Status", callback_data="status")]
+    ])
+
+def indexer_buttons(current):
+    kb = []
+    for idx_id, display in INDEXERS:
+        prefix = "✅" if current == idx_id else "⬜"
+        kb.append([InlineKeyboardButton(f"{prefix} {display}", callback_data=f"filter_{idx_id}")])
+    if current:
+        kb.append([InlineKeyboardButton("🔄 All Indexers", callback_data="filter_all")])
+    return kb
+
+def sort_buttons(cur):
+    return [[InlineKeyboardButton("🆕 Newest" if cur != "date" else "✅🆕 Newest", callback_data="sort_date"),
+             InlineKeyboardButton("📦 Size" if cur != "size" else "✅📦 Size", callback_data="sort_size")]]
+
+def paginate(page, total):
+    kb, nav = [], []
+    if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"p_{page-1}"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{total}", callback_data="noop"))
+    if page < total-1: nav.append(InlineKeyboardButton("▶️", callback_data=f"p_{page+1}"))
+    kb.append(nav)
+    return kb
+
+async def show_search_results(update, ctx, query_or_message):
+    """Show search results - grouping TV shows properly"""
+    result = ctx.user_data.get("search_result")
+    title = ctx.user_data.get("search_title", "")
+    page = ctx.user_data.get("page", 0)
+    sort = ctx.user_data.get("sort", "date")
+    filter_idx = ctx.user_data.get("filter_indexer")
+    
+    if not result:
+        return
+    
+    items = result.get("items", [])
+    
+    # Check if TV show - more TV than movie results
+    tv_items = [x for x in items if x.get('is_tv')]
+    movie_items = [x for x in items if not x.get('is_tv')]
+    
+    if tv_items and len(tv_items) >= len(movie_items):
+        # Group by season using SET (unique episodes)
+        seasons = defaultdict(set)  # season -> set of episodes
+        season_torrents = defaultdict(list)  # season -> list of all torrents for that season
+        
+        for item in tv_items:
+            s = item.get('season')
+            if s:
+                # Ensure it's a simple integer string
+                try:
+                    s_int = int(s)
+                    s_str = str(s_int)
+                except:
+                    s_str = str(s)
+                eps = item.get('episodes', [])
+                if eps:
+                    if 'pack' in eps:
+                        # Full season pack
+                        seasons[s_str].add('pack')
+                    else:
+                        seasons[s_str].update(eps)
+                else:
+                    # Has season but no specific episode - full season
+                    seasons[s_str].add('pack')
+                season_torrents[s_str].append(item)
+        
+        # Sort seasons descending (newest first)
+        sorted_seasons = sorted(seasons.keys(), key=lambda x: int(x) if x.isdigit() else 0, reverse=True)
+        
+        kb = []
+        text = f"📺 *{title}*\n\n*Select Season:*\n\n"
+        
+        for s in sorted_seasons[:10]:
+            eps_set = seasons[s]
+            if 'pack' in eps_set:
+                count_text = "Full Season"
+            else:
+                count_text = f"{len(eps_set)} eps"
+            text += f"📚 Season {s_str} - {count_text}\n"
+            kb.append([InlineKeyboardButton(f"📚 S{s_str} ({count_text})", callback_data=f"season_{s_str}")])
+        
+        kb.append([InlineKeyboardButton("🎬 All Results (Raw)", callback_data="all_results")])
+        kb.append([InlineKeyboardButton("◀️ Back", callback_data="back")])
+        
+        ctx.user_data["seasons"] = season_torrents
+        ctx.user_data["seasons_set"] = dict(seasons)
+        ctx.user_data["tv_mode"] = True
+        
+        if hasattr(query_or_message, 'edit_message_text'):
+            await query_or_message.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await query_or_message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+        return
+    
+    # Regular movie results
+    if sort == "date":
+        items = sorted(items, key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
+    else:
+        items = sorted(items, key=lambda x: int(x.get("Size", 0)), reverse=True)
+    
+    total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    start_idx = page * ITEMS_PER_PAGE
+    
+    kb = []
+    for i, t in enumerate(items[start_idx:start_idx + ITEMS_PER_PAGE]):
+        idx_info = get_indexer_info(t.get("Indexer", "unknown"))
+        emoji = "🔒" if idx_info['name'].endswith('🔒') else "🌐"
+        name = t.get('Title', '?')[:35]
+        size = fmt_size(t.get('Size', '0'))
+        seeders = t.get('Seeders', '0')
+        quality = t.get('quality', 'Unknown')
+        
+        kb.append([InlineKeyboardButton(
+            f"{emoji} {name}\n   📦 {size} | {quality} | 👤 {seeders}",
+            callback_data=f"t_{start_idx + i}")
+        ])
+    
+    kb.extend(indexer_buttons(filter_idx))
+    kb.extend(sort_buttons(sort))
+    kb.extend(paginate(page, total))
+    kb.append([InlineKeyboardButton("◀️ Back", callback_data="back")])
+    
+    text = f"🎬 *{title}*\n\nFound {len(items)} results | 🆕 Newest | Page {page+1}/{total}"
+    
+    if hasattr(query_or_message, 'edit_message_text'):
+        await query_or_message.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await query_or_message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+
+async def show_season_episodes(update, ctx, query_or_message):
+    """Show episodes for selected season"""
+    season = ctx.user_data.get("current_season", "")
+    season_torrents = ctx.user_data.get("seasons", {})
+    episodes_torrents = season_torrents.get(season, [])
+    title = ctx.user_data.get("search_title", "")
+    page = ctx.user_data.get("page", 0)
+    
+    if not episodes_torrents:
+        await query_or_message.edit_message_text("No episodes found.", reply_markup=main_menu())
+        return
+    
+    # Group by quality
+    qualities = defaultdict(list)
+    for ep in episodes_torrents:
+        q = ep.get('quality', 'Unknown')
+        qualities[q].append(ep)
+    
+    # Sort qualities: 4K > 1080p > 720p > 480p
+    quality_order = {'4K': 0, '1080P': 1, '720P': 2, '480P': 3, '540P': 4, 'Unknown': 99}
+    sorted_qualities = sorted(qualities.keys(), key=lambda x: quality_order.get(x, 99))
+    
+    kb = []
+    text = f"📺 *{title}* - Season {season}\n\n*Select Quality:*\n\n"
+    
+    for q in sorted_qualities[:10]:
+        q_episodes = qualities[q]
+        count = len(q_episodes)
+        text += f"{q} - {count} episodes\n"
+        kb.append([InlineKeyboardButton(f"{q} ({count} eps)", callback_data=f"quality_{q}")])
+    
+    kb.append([InlineKeyboardButton("◀️ Back to Seasons", callback_data="back_to_seasons")])
+    
+    ctx.user_data["qualities"] = dict(qualities)
+    ctx.user_data["sorted_qualities"] = sorted_qualities
+    
+    if hasattr(query_or_message, 'edit_message_text'):
+        await query_or_message.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await query_or_message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+
+async def show_quality_episodes(update, ctx, query_or_message):
+    """Show episodes for selected quality"""
+    quality = ctx.user_data.get("current_quality", "")
+    qualities = ctx.user_data.get("qualities", {})
+    episodes = qualities.get(quality, [])
+    title = ctx.user_data.get("search_title", "")
+    season = ctx.user_data.get("current_season", "")
+    page = ctx.user_data.get("page", 0)
+    
+    if not episodes:
+        await query_or_message.edit_message_text("No episodes found.", reply_markup=main_menu())
+        return
+    
+    # Sort episodes descending (newer first)
+    episodes = sorted(episodes, key=lambda x: int(x.get('episode', 0)) if x.get('episode') else 0, reverse=True)
+    
+    total = (len(episodes) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+    start_idx = page * ITEMS_PER_PAGE
+    
+    kb = []
+    text = f"📺 *{title}* - S{season} - {quality}\n\n"
+    
+    for i, ep in enumerate(episodes[start_idx:start_idx + ITEMS_PER_PAGE]):
+        ep_num = ep.get('episode', '?')
+        ep_title = ep.get('Title', '?')[:40]
+        size = fmt_size(ep.get('Size', '0'))
+        seeders = ep.get('Seeders', '0')
+        
+        kb.append([InlineKeyboardButton(
+            f"📝 E{ep_num} | {size} | 👤 {seeders}\n   {ep_title[:35]}",
+            callback_data=f"t_{start_idx + i}")
+        ])
+    
+    nav = []
+    if page > 0: nav.append(InlineKeyboardButton("◀️", callback_data=f"eq_{page-1}"))
+    nav.append(InlineKeyboardButton(f"{page+1}/{total}", callback_data="noop"))
+    if page < total-1: nav.append(InlineKeyboardButton("▶️", callback_data=f"eq_{page+1}"))
+    kb.append(nav)
+    kb.append([InlineKeyboardButton("◀️ Back to Quality", callback_data="back_to_quality")])
+    
+    ctx.user_data["episode_list"] = episodes
+    
+    if hasattr(query_or_message, 'edit_message_text'):
+        await query_or_message.edit_message_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    else:
+        await query_or_message.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+
+async def callback_handler(update, ctx):
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+    
+    if data == "back":
+        ctx.user_data.clear()
+        await query.edit_message_text(
+            "🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot name` to search!",
+            parse_mode='Markdown', reply_markup=main_menu()
+        )
+    
+    elif data == "downloads":
+        torrents = await qbit_get_torrents()
+        if torrents:
+            kb = []
+            for t in torrents[:10]:
+                name = t.get('name', '?')[:30]
+                progress = t.get('progress', 0) * 100
+                bar_len = 10
+                filled = int(bar_len * progress / 100)
+                bar = "█" * filled + "░" * (bar_len - filled)
+                emoji = "⬇️" if t.get('state') in ['downloading', 'stalledDL'] else "✅"
+                kb.append([InlineKeyboardButton(f"{emoji} {name}\n{bar} {progress:.0f}%", callback_data=f"dl_{t.get('hash', '')}")])
+            kb.extend([[InlineKeyboardButton("🔄 Refresh", callback_data="downloads")], [InlineKeyboardButton("◀️ Back", callback_data="back")]])
+            await query.edit_message_text(f"📥 Downloads ({len(torrents)}):", reply_markup=InlineKeyboardMarkup(kb))
+        else:
+            await query.edit_message_text("📥 No downloads.", reply_markup=main_menu())
+    
+    elif data.startswith("dl_"):
+        h = data.split("_")[1]
+        torrents = await qbit_get_torrents()
+        t = next((x for x in torrents if x.get('hash') == h), None)
+        if t:
+            name = t.get('name', '?')
+            progress = t.get('progress', 0) * 100
+            bar_len = 15
+            filled = int(bar_len * progress / 100)
+            bar = "█" * filled + "░" * (bar_len - filled)
+            info = f"🎬 {name[:50]}\n\n📊 {bar} {progress:.1f}%\n📦 {fmt_size(t.get('downloaded', 0))} / {fmt_size(t.get('size', 0))}\n🔰 State: {t.get('state', '?')}"
+            if progress >= 1.0:
+                files = await qbit_get_files(h)
+                if files:
+                    fn = files[0].get('name', name)
+                    info += f"\n\n🔗 Download: {FILE_SERVER_URL}/download/{fn}"
+            kb = [[InlineKeyboardButton("🗑️ Delete", callback_data=f"del_{h}")], [InlineKeyboardButton("◀️ Back", callback_data="downloads")]]
+            await query.edit_message_text(info, reply_markup=InlineKeyboardMarkup(kb))
+    
+    elif data.startswith("del_"):
+        h = data.split("_")[1]
+        try:
+            async with aiohttp.ClientSession() as s:
+                await s.post(f"{QBITTORRENT_URL}/api/v2/torrents/delete", data={"hashes": h, "deleteFiles": True})
+        except: pass
+        await query.edit_message_text("✅ Deleted!", reply_markup=main_menu())
+    
+    elif data.startswith("filter_"):
+        ctx.user_data["filter_indexer"] = None if data == "filter_all" else data.replace("filter_", "")
+        ctx.user_data["page"] = 0
+        await show_search_results(update, ctx, query)
+    
+    elif data.startswith("season_"):
+        ctx.user_data["current_season"] = data.replace("season_", "")
+        ctx.user_data["page"] = 0
+        await show_season_episodes(update, ctx, query)
+    
+    elif data.startswith("quality_"):
+        ctx.user_data["current_quality"] = data.replace("quality_", "")
+        ctx.user_data["page"] = 0
+        await show_quality_episodes(update, ctx, query)
+    
+    elif data == "back_to_seasons":
+        await show_search_results(update, ctx, query)
+    
+    elif data == "back_to_quality":
+        await show_season_episodes(update, ctx, query)
+    
+    elif data == "all_results":
+        ctx.user_data["tv_mode"] = False
+        await show_search_results(update, ctx, query)
+    
+    elif data.startswith("p_"):
+        ctx.user_data["page"] = int(data.split("_")[1])
+        await show_search_results(update, ctx, query)
+    
+    elif data.startswith("eq_"):
+        ctx.user_data["page"] = int(data.split("_")[1])
+        await show_quality_episodes(update, ctx, query)
+    
+    elif data.startswith("t_"):
+        idx = int(data.split("_")[1])
+        result = ctx.user_data.get("search_result")
+        
+        if ctx.user_data.get("tv_mode"):
+            # TV mode
+            if ctx.user_data.get("current_quality"):
+                # Quality episode mode
+                episodes = ctx.user_data.get("episode_list", [])
+                if idx < len(episodes):
+                    t = episodes[idx]
+                    magnet = t.get("Magnet", "")
+                    if magnet and await qbit_add_magnet(magnet):
+                        await query.edit_message_text(
+                            f"✅ Added!\n\n🎬 {t['Title'][:50]}\n📦 {fmt_size(t.get('Size', '0'))}\n👤 {t.get('Seeders', '0')} seeders",
+                            reply_markup=main_menu()
+                        )
+                    else:
+                        await query.edit_message_text("❌ Failed to add.", reply_markup=main_menu())
+            else:
+                # Season mode - go to quality selection
+                await show_season_episodes(update, ctx, query)
+        else:
+            # Movie mode
+            items = result.get("items", [])
+            if idx < len(items):
+                t = items[idx]
+                magnet = t.get("Magnet", "")
+                if magnet and await qbit_add_magnet(magnet):
+                    await query.edit_message_text(
+                        f"✅ Added!\n\n🎬 {t['Title'][:50]}\n📦 {fmt_size(t.get('Size', '0'))}\n👤 {t.get('Seeders', '0')} seeders",
+                        reply_markup=main_menu()
+                    )
+                else:
+                    await query.edit_message_text("❌ Failed to add.", reply_markup=main_menu())
+    
+    elif data in ["sort_date", "sort_size"]:
+        ctx.user_data["sort"] = data.split("_")[1]
+        ctx.user_data["page"] = 0
+        await show_search_results(update, ctx, query)
+    
+    elif data == "status":
+        torrents = await qbit_get_torrents()
+        active = len([t for t in torrents if t.get('state') in ['downloading', 'stalledDL']])
+        seeding = len([t for t in torrents if t.get('state') == 'uploading'])
+        total = sum([t.get('size', 0) for t in torrents])
+        await query.edit_message_text(
+            f"⚙️ Status\n\n✅ Bot: Online\n📥 Torrents: {len(torrents)}\n⬇️ Downloading: {active}\n⬆️ Seeding: {seeding}\n💾 Total: {fmt_size(total)}",
+            reply_markup=main_menu()
+        )
+
+async def imdb_command(update, ctx):
+    if not update.message or not update.message.text:
+        return
+    text = update.message.text
+    parts = text[6:].strip().rsplit(" ", 1)
+    if len(parts) >= 1:
+        title = parts[0]
+        year = parts[1] if len(parts) > 1 else ""
+        search_q = f"{title} {year}".strip()
+        await update.message.reply_text(f"🔍 Searching: {search_q}")
+        
+        filter_idx = ctx.user_data.get("filter_indexer")
+        result = await search_jackett(search_q, filter_idx)
+        
+        if result:
+            ctx.user_data["search_result"] = result
+            ctx.user_data["search_title"] = search_q
+            ctx.user_data["page"] = 0
+            ctx.user_data["sort"] = "date"
+            await show_search_results(update, ctx, update.message)
+        else:
+            await update.message.reply_text("❌ No results found.", reply_markup=main_menu())
+
+async def inline_query(update, ctx):
+    query = update.inline_query.query
+    if not query or len(query) < 2:
+        return
+    results = await get_imdb_posters(query)
+    if not results:
+        return
+    articles = []
+    for i, item in enumerate(results):
+        articles.append(InlineQueryResultArticle(
+            id=str(i),
+            title=f"{item['title']} ({item['year']})",
+            description="🎬 Tap to search",
+            thumbnail_url=item.get('poster', ''),
+            input_message_content=InputTextMessageContent(message_text=f"/imdb {item['title']} {item['year']}")
+        ))
+    await update.inline_query.answer(articles, cache_time=300, is_personal=True)
+
+async def message_handler(update, ctx):
+    await update.message.reply_text(
+        "🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot movie name` in any chat!",
+        parse_mode='Markdown', reply_markup=main_menu()
+    )
+
+def main():
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(CommandHandler("start", lambda u, c: u.message.reply_text("🌙 Night Leech Bot 🦞\n\n🔍 Type `@NightLeechBot name`!", reply_markup=main_menu())))
+    app.add_handler(CommandHandler("imdb", imdb_command))
+    app.add_handler(CallbackQueryHandler(callback_handler))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    app.add_handler(InlineQueryHandler(inline_query))
+    logger.info("Night Leech Bot started!")
+    app.run_polling()
+
+if __name__ == "__main__":
+    main()

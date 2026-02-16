@@ -2,8 +2,8 @@
 """
 Night Leech Bot - Simplified & Reliable
 - Shows raw results by default (newest first)
-- Groups by quality when clear
-- Simple season/episode detection
+- Groups by quality when TV content is dominant
+- Improved parsing for anime/TV shows
 """
 
 import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
@@ -28,6 +28,7 @@ INDEXERS = [
 ]
 
 ITEMS_PER_PAGE = 8
+
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO,
@@ -44,38 +45,39 @@ def fmt_size(s):
     except: return "?"
 
 def parse_title(title):
-    """Simple title parsing"""
+    """Improved parsing for anime/TV"""
     result = {
-        'season': None, 'episode': None, 
-        'quality': 'Unknown', 'is_tv': False, 
-        'title': title
+        'season': None, 'episode': None, 'episodes': set(),
+        'quality': 'Unknown', 'is_tv': False, 'is_pack': False, 'title': title
     }
     
-    # Quality
+    # Quality first
     q = re.search(r'(4K|2160p|1080p|720p|480p|540p)', title, re.I)
     if q:
         result['quality'] = q.group(1).upper().replace('2160P', '4K')
     
-    # S01E01 or S1E1
-    m = re.search(r'[Ss](\d+)[Ee](\d+)', title)
+    # S01E01 / S1E1 / S01 E01 / S01X01
+    m = re.search(r'[Ss](\d+)[EeXx](\d+)', title)
     if m:
+        result['is_tv'] = True
         result['season'] = int(m.group(1))
         result['episode'] = int(m.group(2))
+        result['episodes'].add(int(m.group(2)))
+        return result
+    
+    # SubsPlease style: - 47 or - 07
+    m = re.search(r'-\s*(\d{1,3})\s', title)
+    if m:
         result['is_tv'] = True
+        result['episode'] = int(m.group(1))
+        result['episodes'].add(int(m.group(1)))
     
-    # Season X or Season 1
-    if not result['is_tv']:
-        m = re.search(r'[Ss]eason[\s._-]*(\d+)', title, re.I)
-        if m:
-            result['season'] = int(m.group(1))
-            result['is_tv'] = True
-    
-    # Standalone S01 (not followed by E)
-    if not result['is_tv']:
-        m = re.search(r'[Ss](\d+)(?:\s|[^E]|$)', title)
-        if m:
-            result['season'] = int(m.group(1))
-            result['is_tv'] = True
+    # Season pack: Season 1 or S01 (not followed by E/X)
+    m = re.search(r'[Ss]eason[\s._-]*(\d+)|[Ss](\d+)(?!\d*[EeXx]\d)', title, re.I)
+    if m:
+        result['is_tv'] = True
+        result['season'] = int(m.group(1) or m.group(2))
+        result['is_pack'] = True
     
     return result
 
@@ -85,7 +87,6 @@ def parse_pubdate(pub):
     except: return datetime.min
 
 async def search_jackett(query, indexer_filter=None):
-    """Search Jackett - returns all results sorted by date"""
     try:
         import urllib.parse
         results = []
@@ -225,10 +226,15 @@ async def show_results(update, ctx, msg):
         if t.get('is_tv'):
             s = t.get('season', '')
             e = t.get('episode', '')
+            is_pack = t.get('is_pack', False)
             if s and e:
                 se_info = f" S{s}E{e}"
+            elif s and is_pack:
+                se_info = f" S{s} (Pack)"
             elif s:
                 se_info = f" S{s}"
+            elif e:
+                se_info = f" E{e}"
         
         text += f"*{start+i+1}.* {idx_emoji} {quality}{se_info}\n"
         text += f"   {name}\n"

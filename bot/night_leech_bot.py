@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Night Leech Bot - Raw Results
-- Show raw Jackett results (no parsing)
-- Up to 30 per page
-- All info in buttons
+Night Leech Bot - Simple Download
 """
 
 import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
@@ -36,9 +33,9 @@ logger = logging.getLogger(__name__)
 def fmt_size(s):
     try:
         v = int(s)
-        if v >= 1073741824: return f"{v/1073741824:.1f}G"
-        elif v >= 1048576: return f"{v/1048576:.1f}M"
-        else: return f"{v/1024:.0f}K"
+        if v >= 1073741824: return f"{v/1073741824:.1f}GB"
+        elif v >= 1048576: return f"{v/1048576:.1f}MB"
+        else: return f"{v/1024:.0f}KB"
     except: return "?"
 
 def parse_pubdate(pub):
@@ -46,7 +43,7 @@ def parse_pubdate(pub):
         return datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M:%S") if pub else datetime.min
     except: return datetime.min
 
-async def search_jackett(query, indexer_filter=None, sort_by="newest", limit=30):
+async def search_jackett(query, indexer_filter=None, sort_by="newest"):
     try:
         import urllib.parse
         results = []
@@ -59,8 +56,8 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest", limit=30)
                     "t": "search", 
                     "q": query,
                     "sort": "date" if sort_by == "newest" else "seeders",
-                    "limit": limit,
-                    "order": "desc"
+                    "order": "desc",
+                    "limit": 30
                 })
                 url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results/torznab/api?{params}"
                 
@@ -75,7 +72,7 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest", limit=30)
                                     comments = item.find('comments').text or ""
                                     magnet = comments if comments.startswith('magnet:') else ""
                                     size_elem = item.find('size')
-                                    seeders_elem = item.find('.//torznab[@name="newest"]')
+                                    seeders_elem = item.find('.//torznab[@name="seeders"]')
                                     
                                     results.append({
                                         "Title": title,
@@ -90,9 +87,9 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest", limit=30)
         
         # Sort
         if sort_by == "newest":
-            results.sort(key=lambda x: int(x.get("Seeders", 0)), reverse=True)
-        else:
             results.sort(key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
+        else:
+            results.sort(key=lambda x: int(x.get("Seeders", 0)), reverse=True)
         
         return results
     except Exception as e:
@@ -179,13 +176,13 @@ async def show_results(update, ctx, msg):
     total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start = page * ITEMS_PER_PAGE
     
-    text = f"🔍 *{title}*\n\n📊 {len(items)} results | "
-    text += "👤 Top" if sort == "newest" else "🆕 New"
-    text += f" | Page {page+1}/{total}\n"
+    # Caption with all info
+    caption = f"🔍 *{title}*\n\n📊 {len(items)} results | "
+    caption += "🆕 New" if sort == "newest" else "👤 Top"
+    caption += f" | Page {page+1}/{total}\n\n"
     
     kb = []
     for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        # Get indexer short name
         idx_short = "🌐"
         for i_id, i_name in INDEXERS:
             if i_id == t.get('Indexer'):
@@ -194,13 +191,13 @@ async def show_results(update, ctx, msg):
         
         size = fmt_size(t.get('Size', '0'))
         seeders = t.get('Seeders', '0')
-        name = t.get('Title', '?')[:50]
+        name = t.get('Title', '?')
         
-        # All info in button
-        btn_text = f"{idx_short} {size} 👤{seeders} | {name[:40]}"
+        # Add to caption
+        caption += f"{start+i+1}. *{idx_short}* {size} 👤{seeders}\n{name[:60]}\n\n"
         
-        text += f"{start+i+1}. "
-        kb.append([InlineKeyboardButton(btn_text, callback_data=f"t_{start+i}")])
+        # Button just says download
+        kb.append([InlineKeyboardButton(f"⬇️ Download {start+i+1}", callback_data=f"t_{start+i}")])
     
     kb.extend(paginate(page, total))
     kb.extend(sort_buttons(sort))
@@ -208,9 +205,10 @@ async def show_results(update, ctx, msg):
     kb.append([InlineKeyboardButton("◀️ Back", callback_data="back")])
     
     try:
-        await msg.edit_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
-    except:
-        await msg.reply_text(text, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+        await msg.edit_text(caption, parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        await msg.reply_text(caption[:1000], parse_mode='Markdown', reply_markup=InlineKeyboardMarkup(kb))
 
 async def callback_handler(update, ctx):
     query = update.callback_query
@@ -310,7 +308,7 @@ async def imdb_command(update, ctx):
         return
     msg = await update.message.reply_text(f"🔍 Searching: {search_q}")
     
-    results = await search_jackett(search_q, None, "newest", 30)
+    results = await search_jackett(search_q, None, "newest")
     
     if results:
         ctx.user_data["results"] = results

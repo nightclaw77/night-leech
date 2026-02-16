@@ -1,9 +1,6 @@
 #!/usr/bin/env python3
 """
-Night Leech Bot - Simplified & Reliable
-- Shows raw results by default (newest first)
-- Groups by quality when TV content is dominant
-- Improved parsing for anime/TV shows
+Night Leech Bot v2.2 - TV Grouping by Quality
 """
 
 import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
@@ -19,7 +16,6 @@ JACKETT_API_KEY = "3kknp1d7trlr6tp95apmcwndu53d0cm9"
 QBITTORRENT_URL = "http://localhost:8083"
 FILE_SERVER_URL = "https://files.nightsub.ir"
 
-# Indexers
 INDEXERS = [
     ("torrentgalaxyclone", "TorrentGalaxy 🌐"),
     ("subsplease", "SubsPlease 📺"),
@@ -45,18 +41,12 @@ def fmt_size(s):
     except: return "?"
 
 def parse_title(title):
-    """Improved parsing for anime/TV"""
-    result = {
-        'season': None, 'episode': None, 'episodes': set(),
-        'quality': 'Unknown', 'is_tv': False, 'is_pack': False, 'title': title
-    }
+    result = {'season': None, 'episode': None, 'episodes': set(), 'quality': 'Unknown', 'is_tv': False, 'is_pack': False, 'title': title}
     
-    # Quality first
     q = re.search(r'(4K|2160p|1080p|720p|480p|540p)', title, re.I)
     if q:
         result['quality'] = q.group(1).upper().replace('2160P', '4K')
     
-    # S01E01 / S1E1 / S01 E01 / S01X01
     m = re.search(r'[Ss](\d+)[EeXx](\d+)', title)
     if m:
         result['is_tv'] = True
@@ -65,14 +55,12 @@ def parse_title(title):
         result['episodes'].add(int(m.group(2)))
         return result
     
-    # SubsPlease style: - 47 or - 07
     m = re.search(r'-\s*(\d{1,3})\s', title)
     if m:
         result['is_tv'] = True
         result['episode'] = int(m.group(1))
         result['episodes'].add(int(m.group(1)))
     
-    # Season pack: Season 1 or S01 (not followed by E/X)
     m = re.search(r'[Ss]eason[\s._-]*(\d+)|[Ss](\d+)(?!\d*[EeXx]\d)', title, re.I)
     if m:
         result['is_tv'] = True
@@ -94,13 +82,7 @@ async def search_jackett(query, indexer_filter=None):
         
         for idx_id in indexers:
             try:
-                params = urllib.parse.urlencode({
-                    "apikey": JACKETT_API_KEY, 
-                    "t": "search", 
-                    "q": query,
-                    "sort": "date",
-                    "order": "desc"
-                })
+                params = urllib.parse.urlencode({"apikey": JACKETT_API_KEY, "t": "search", "q": query, "sort": "date", "order": "desc"})
                 url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results/torznab/api?{params}"
                 
                 async with aiohttp.ClientSession() as s:
@@ -111,28 +93,24 @@ async def search_jackett(query, indexer_filter=None):
                                 root = ET.fromstring(text)
                                 for item in root.findall('.//item'):
                                     title = item.find('title').text or "?"
-                                    comments = item.find('comments').text or ""
-                                    magnet = comments if comments.startswith('magnet:') else ""
+                                    magnet = item.find('comments').text or ""
+                                    magnet = magnet if magnet.startswith('magnet:') else ""
                                     
                                     parsed = parse_title(title)
                                     
                                     results.append({
-                                        "Title": title,
-                                        "Magnet": magnet,
+                                        "Title": title, "Magnet": magnet,
                                         "Size": item.find('size').text or "0",
                                         "Seeders": item.find('.//torznab[@name="seeders"]').get('value', '0') if item.find('.//torznab[@name="seeders"]') is not None else '0',
                                         "Indexer": idx_id,
-                                        "PubDate": item.find('pubDate').text or "",
                                         "ParsedDate": parse_pubdate(item.find('pubDate').text),
                                         **parsed
                                     })
             except Exception as e:
                 logger.error(f"Jackett {idx_id}: {e}")
         
-        # Sort by date descending (newest first)
         results.sort(key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
         return results
-        
     except Exception as e:
         logger.error(f"Jackett error: {e}")
     return []
@@ -198,7 +176,6 @@ def paginate(page, total):
     return kb
 
 async def show_results(update, ctx, msg):
-    """Show all results in a simple list"""
     items = ctx.user_data.get("results", [])
     title = ctx.user_data.get("search_title", "")
     page = ctx.user_data.get("page", 0)
@@ -208,42 +185,84 @@ async def show_results(update, ctx, msg):
         await msg.edit_text("❌ No results.")
         return
     
-    total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
-    start = page * ITEMS_PER_PAGE
+    tv_items = [x for x in items if x.get('is_tv')]
+    other_items = [x for x in items if not x.get('is_tv')]
     
-    kb = []
-    text = f"🔍 *{title}*\n\nFound *{len(items)}* results | 🆕 Newest\n\n"
+    if tv_items and len(tv_items) >= len(other_items):
+        # TV mode: group by quality
+        quality_groups = defaultdict(list)
+        for item in tv_items:
+            q = item.get('quality', 'Unknown')
+            quality_groups[q].append(item)
+        
+        quality_order = {'4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 99}
+        sorted_qualities = sorted(quality_groups.keys(), key=lambda x: quality_order.get(x, 99))
+        
+        text = f"🔍 *{title}* (TV Mode)\n\n"
+        kb = []
+        global_idx = 0
+        display_items = []
+        
+        for q in sorted_qualities:
+            group = quality_groups[q]
+            text += f"📺 *{q}* ({len(group)} results)\n"
+            for t in group:
+                se_info = ""
+                if t.get('season'):
+                    s = t.get('season')
+                    eps = sorted(list(t.get('episodes') or []))
+                    if t.get('is_pack'):
+                        se_info = f" S{s} Pack"
+                    elif eps:
+                        if len(eps) > 1:
+                            se_info = f" S{s}E{eps[0]}-{eps[-1]}"
+                        else:
+                            se_info = f" S{s}E{eps[0]}"
+                
+                name = t.get('Title', '?')[:50]
+                size = fmt_size(t.get('Size', '0'))
+                seeders = t.get('Seeders', '0')
+                idx_emoji = "🔒" if t.get('Indexer') == 'iptorrents' else "🌐"
+                
+                text += f"• {idx_emoji} {name}{se_info}\n"
+                text += f" 📦 {size} | 👤 {seeders}\n\n"
+                
+                kb.append([InlineKeyboardButton(f"{q}{se_info} {size} 👤{seeders}", callback_data=f"t_{global_idx}")])
+                display_items.append(t)
+                global_idx += 1
+        
+        ctx.user_data["results"] = display_items
+    else:
+        # Raw mode
+        text = f"🔍 *{title}*\n\nFound *{len(items)}* results | 🆕 Newest\n\n"
+        kb = []
+        start = page * ITEMS_PER_PAGE
+        total_pages = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
+        
+        for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
+            idx_emoji = "🔒" if t.get('Indexer') == 'iptorrents' else "🌐"
+            quality = t.get('quality', '?')
+            size = fmt_size(t.get('Size', '0'))
+            seeders = t.get('Seeders', '0')
+            name = t.get('Title', '?')[:45]
+            se_info = ""
+            if t.get('is_tv'):
+                s = t.get('season', '')
+                e = t.get('episode', '')
+                if s and e:
+                    se_info = f" S{s}E{e}"
+                elif s:
+                    se_info = f" S{s}"
+            
+            text += f"*{start+i+1}.* {idx_emoji} {quality}{se_info}\n"
+            text += f" {name}\n"
+            text += f" 📦 {size} | 👤 {seeders}\n\n"
+            
+            kb.append([InlineKeyboardButton(f"{idx_emoji} {quality}{se_info} {size}", callback_data=f"t_{start+i}")])
+        
+        kb.extend(paginate(page, total_pages))
+        ctx.user_data["results"] = items
     
-    for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        idx_emoji = "🔒" if t.get('Indexer') == 'iptorrents' else "🌐"
-        quality = t.get('quality', '?')
-        size = fmt_size(t.get('Size', '0'))
-        seeders = t.get('Seeders', '0')
-        name = t.get('Title', '?')[:45]
-        
-        # Add S/E info if TV
-        se_info = ""
-        if t.get('is_tv'):
-            s = t.get('season', '')
-            e = t.get('episode', '')
-            is_pack = t.get('is_pack', False)
-            if s and e:
-                se_info = f" S{s}E{e}"
-            elif s and is_pack:
-                se_info = f" S{s} (Pack)"
-            elif s:
-                se_info = f" S{s}"
-            elif e:
-                se_info = f" E{e}"
-        
-        text += f"*{start+i+1}.* {idx_emoji} {quality}{se_info}\n"
-        text += f"   {name}\n"
-        text += f"   📦 {size} | 👤 {seeders}\n\n"
-        
-        kb.append([InlineKeyboardButton(f"{idx_emoji} {quality}{se_info} {size}", callback_data=f"t_{start+i}")])
-    
-    # Navigation and filters
-    kb.extend(paginate(page, total))
     kb.extend(indexer_buttons(filter_idx))
     kb.append([InlineKeyboardButton("◀️ Back", callback_data="back")])
     
@@ -259,10 +278,7 @@ async def callback_handler(update, ctx):
     
     if data == "back":
         ctx.user_data.clear()
-        await query.edit_message_text(
-            "🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot name` to search!",
-            parse_mode='Markdown', reply_markup=main_menu()
-        )
+        await query.edit_message_text("🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot name` to search!", parse_mode='Markdown', reply_markup=main_menu())
     
     elif data == "downloads":
         torrents = await qbit_get_torrents()
@@ -307,11 +323,9 @@ async def callback_handler(update, ctx):
         idx = None if data == "filter_all" else data.replace("filter_", "")
         ctx.user_data["filter_indexer"] = idx
         ctx.user_data["page"] = 0
-        
         title = ctx.user_data.get("search_title", "")
         results = await search_jackett(title, idx)
         ctx.user_data["results"] = results
-        
         await show_results(update, ctx, query)
     
     elif data.startswith("p_"):
@@ -325,10 +339,7 @@ async def callback_handler(update, ctx):
             t = items[idx]
             magnet = t.get("Magnet", "")
             if magnet and await qbit_add_magnet(magnet):
-                await query.edit_message_text(
-                    f"✅ Added!\n\n🎬 {t['Title'][:50]}\n📦 {fmt_size(t.get('Size', '0'))}\n👤 {t.get('Seeders', '0')} seeders",
-                    reply_markup=main_menu()
-                )
+                await query.edit_message_text(f"✅ Added!\n\n🎬 {t['Title'][:50]}\n📦 {fmt_size(t.get('Size', '0'))}\n👤 {t.get('Seeders', '0')} seeders", reply_markup=main_menu())
             else:
                 await query.edit_message_text("❌ Failed to add.", reply_markup=main_menu())
     
@@ -337,23 +348,16 @@ async def callback_handler(update, ctx):
         active = len([t for t in torrents if t.get('state') in ['downloading', 'stalledDL']])
         seeding = len([t for t in torrents if t.get('state') == 'uploading'])
         total = sum([t.get('size', 0) for t in torrents])
-        await query.edit_message_text(
-            f"⚙️ Status\n\n✅ Bot: Online\n📥 Torrents: {len(torrents)}\n⬇️ Downloading: {active}\n⬆️ Seeding: {seeding}\n💾 Total: {fmt_size(total)}",
-            reply_markup=main_menu()
-        )
+        await query.edit_message_text(f"⚙️ Status\n\n✅ Bot: Online\n📥 Torrents: {len(torrents)}\n⬇️ Downloading: {active}\n⬆️ Seeding: {seeding}\n💾 Total: {fmt_size(total)}", reply_markup=main_menu())
 
 async def imdb_command(update, ctx):
     if not update.message or not update.message.text:
         return
-    
     search_q = update.message.text[6:].strip()
     if not search_q:
         return
-    
     msg = await update.message.reply_text(f"🔍 Searching: {search_q}")
-    
     results = await search_jackett(search_q)
-    
     if results:
         ctx.user_data["results"] = results
         ctx.user_data["search_title"] = search_q
@@ -367,28 +371,16 @@ async def inline_query(update, ctx):
     query = update.inline_query.query
     if not query or len(query) < 2:
         return
-    
     results = await get_imdb_posters(query)
     if not results:
         return
-    
     articles = []
     for i, item in enumerate(results):
-        articles.append(InlineQueryResultArticle(
-            id=str(i),
-            title=f"{item['title']} ({item['year']})",
-            description="🎬 Tap to search",
-            thumbnail_url=item.get('poster', ''),
-            input_message_content=InputTextMessageContent(message_text=f"/imdb {item['title']} {item['year']}")
-        ))
-    
+        articles.append(InlineQueryResultArticle(id=str(i), title=f"{item['title']} ({item['year']})", description="🎬 Tap to search", thumbnail_url=item.get('poster', ''), input_message_content=InputTextMessageContent(message_text=f"/imdb {item['title']} {item['year']}")))
     await update.inline_query.answer(articles, cache_time=300, is_personal=True)
 
 async def message_handler(update, ctx):
-    await update.message.reply_text(
-        "🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot name` to search!",
-        parse_mode='Markdown', reply_markup=main_menu()
-    )
+    await update.message.reply_text("🌙 *Night Leech Bot* 🦞\n\n🔍 Type `@NightLeechBot name` to search!", parse_mode='Markdown', reply_markup=main_menu())
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()

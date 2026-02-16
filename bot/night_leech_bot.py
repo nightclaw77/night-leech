@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
 """
-Night Leech Bot - Simple & Fast
-- No grouping, just results
-- Filter by indexer
-- 30 results per page
-- Sort by seeders/newest
+Night Leech Bot - Raw Results
+- Show raw Jackett results (no parsing)
+- Up to 30 per page
+- All info in buttons
 """
 
 import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
@@ -19,10 +18,10 @@ QBITTORRENT_URL = "http://localhost:8083"
 FILE_SERVER_URL = "https://files.nightsub.ir"
 
 INDEXERS = [
-    ("torrentgalaxyclone", "TorrentGalaxy 🌐"),
-    ("subsplease", "SubsPlease 📺"),
-    ("eztv", "EZTV 📺"),
-    ("iptorrents", "IPTorrents 🔒"),
+    ("torrentgalaxyclone", "TG"),
+    ("subsplease", "SP"),
+    ("eztv", "EZ"),
+    ("iptorrents", "IPT"),
 ]
 
 ITEMS_PER_PAGE = 30
@@ -37,17 +36,10 @@ logger = logging.getLogger(__name__)
 def fmt_size(s):
     try:
         v = int(s)
-        if v >= 1073741824: return f"{v/1073741824:.1f}GB"
-        elif v >= 1048576: return f"{v/1048576:.1f}MB"
-        else: return f"{v/1024:.1f}KB"
+        if v >= 1073741824: return f"{v/1073741824:.1f}G"
+        elif v >= 1048576: return f"{v/1048576:.1f}M"
+        else: return f"{v/1024:.0f}K"
     except: return "?"
-
-def parse_title(title):
-    result = {'quality': '?', 'title': title}
-    q = re.search(r'(4K|2160p|1080p|720p|480p)', title, re.I)
-    if q:
-        result['quality'] = q.group(1).upper().replace('2160P', '4K')
-    return result
 
 def parse_pubdate(pub):
     try:
@@ -81,17 +73,16 @@ async def search_jackett(query, indexer_filter=None, sort_by="seeders"):
                                     title = item.find('title').text or "?"
                                     comments = item.find('comments').text or ""
                                     magnet = comments if comments.startswith('magnet:') else ""
-                                    
-                                    parsed = parse_title(title)
+                                    size_elem = item.find('size')
                                     seeders_elem = item.find('.//torznab[@name="seeders"]')
                                     
                                     results.append({
-                                        "Title": title, "Magnet": magnet,
-                                        "Size": item.find('size').text or "0",
+                                        "Title": title,
+                                        "Magnet": magnet,
+                                        "Size": size_elem.text if size_elem is not None else "0",
                                         "Seeders": seeders_elem.get('value', '0') if seeders_elem is not None else '0',
                                         "Indexer": idx_id,
-                                        "ParsedDate": parse_pubdate(item.find('pubDate').text),
-                                        **parsed
+                                        "ParsedDate": parse_pubdate(item.find('pubDate').text if item.find('pubDate') is not None else None),
                                     })
             except Exception as e:
                 logger.error(f"Jackett {idx_id}: {e}")
@@ -155,15 +146,15 @@ def indexer_buttons(current):
     row = []
     for idx_id, display in INDEXERS:
         prefix = "✅" if current == idx_id else "⬜"
-        row.append(InlineKeyboardButton(f"{prefix} {display}", callback_data=f"idx_{idx_id}"))
+        row.append(InlineKeyboardButton(f"{prefix}{display}", callback_data=f"idx_{idx_id}"))
     kb.append(row)
     if current:
-        kb.append([InlineKeyboardButton("🔄 All Indexers", callback_data="idx_all")])
+        kb.append([InlineKeyboardButton("🔄 All", callback_data="idx_all")])
     return kb
 
 def sort_buttons(current):
-    return [[InlineKeyboardButton("👤 Top" if current == "seeders" else "👤 Top Seeders", callback_data="sort_seeders"),
-             InlineKeyboardButton("🆕 Newest" if current == "newest" else "🆕 Newest", callback_data="sort_newest")]]
+    return [[InlineKeyboardButton("👤 Top" if current == "seeders" else "👤 Top", callback_data="sort_seeders"),
+             InlineKeyboardButton("🆕 New" if current == "newest" else "🆕 New", callback_data="sort_newest")]]
 
 def paginate(page, total):
     kb, nav = [], []
@@ -187,22 +178,28 @@ async def show_results(update, ctx, msg):
     total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start = page * ITEMS_PER_PAGE
     
-    text = f"🔍 *{title}*\n\n📊 *{len(items)}* results | "
-    text += "👤 Top" if sort == "seeders" else "🆕 Newest"
-    text += f" | Page {page+1}/{total}\n\n"
+    text = f"🔍 *{title}*\n\n📊 {len(items)} results | "
+    text += "👤 Top" if sort == "seeders" else "🆕 New"
+    text += f" | Page {page+1}/{total}\n"
     
     kb = []
     for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        idx_emoji = "🔒" if t.get('Indexer') == 'iptorrents' else "🌐"
-        quality = t.get('quality', '?')
+        # Get indexer short name
+        idx_short = "🌐"
+        for i_id, i_name in INDEXERS:
+            if i_id == t.get('Indexer'):
+                idx_short = i_name
+                break
+        
         size = fmt_size(t.get('Size', '0'))
         seeders = t.get('Seeders', '0')
-        name = t.get('Title', '?')[:55]
+        name = t.get('Title', '?')[:50]
         
-        text += f"*{start+i+1}.* {idx_emoji} {quality} | 📦{size} | 👤{seeders}\n"
-        text += f"   {name}\n\n"
+        # All info in button
+        btn_text = f"{idx_short} {size} 👤{seeders} | {name[:40]}"
         
-        kb.append([InlineKeyboardButton(f"{idx_emoji} {quality} {size} 👤{seeders}", callback_data=f"t_{start+i}")])
+        text += f"{start+i+1}. "
+        kb.append([InlineKeyboardButton(btn_text, callback_data=f"t_{start+i}")])
     
     kb.extend(paginate(page, total))
     kb.extend(sort_buttons(sort))
@@ -228,11 +225,11 @@ async def callback_handler(update, ctx):
         if torrents:
             kb = []
             for t in torrents[:10]:
-                name = t.get('name', '?')[:30]
+                name = t.get('name', '?')[:25]
                 progress = t.get('progress', 0) * 100
                 bar = "█" * int(progress/10) + "░" * (10 - int(progress/10))
                 emoji = "⬇️" if t.get('state') in ['downloading', 'stalledDL'] else "✅"
-                kb.append([InlineKeyboardButton(f"{emoji} {name[:20]}\n{bar} {progress:.0f}%", callback_data=f"dl_{t.get('hash', '')}")])
+                kb.append([InlineKeyboardButton(f"{emoji} {name[:20]} {bar} {progress:.0f}%", callback_data=f"dl_{t.get('hash', '')}")])
             kb.extend([[InlineKeyboardButton("🔄 Refresh", callback_data="downloads")], [InlineKeyboardButton("◀️ Back", callback_data="back")]])
             await query.edit_message_text(f"📥 Downloads ({len(torrents)}):", reply_markup=InlineKeyboardMarkup(kb))
         else:

@@ -3,7 +3,7 @@
 Night Leech Bot - Simple Download
 """
 
-import os, asyncio, logging, aiohttp, xml.etree.ElementTree as ET, re
+import os, asyncio, logging, aiohttp, json
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, InlineQueryHandler
@@ -40,7 +40,12 @@ def fmt_size(s):
 
 def parse_pubdate(pub):
     try:
-        return datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M:%S") if pub else datetime.min
+        if not pub:
+            return datetime.min
+        # Handle ISO format from JSON
+        if 'T' in pub:
+            return datetime.fromisoformat(pub.replace('Z', '+00:00'))
+        return datetime.min
     except: return datetime.min
 
 async def search_jackett(query, indexer_filter=None, sort_by="newest"):
@@ -66,9 +71,13 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest"):
                             items = data.get('Results', [])
                             for item in items:
                                 title = item.get('Title', '?')
-                                magnet = item.get('Magnet', '') or item.get('Link', '')
-                                if not magnet.startswith('magnet:'):
-                                    magnet = ''
+                                # Get magnet
+                                magnet = item.get('Magnet', '')
+                                if not magnet or not magnet.startswith('magnet:'):
+                                    # Try to get from guid
+                                    guid = item.get('Guid', '')
+                                    if 'magnet:' in str(guid).lower():
+                                        magnet = guid
                                 
                                 results.append({
                                     "Title": title,
@@ -172,10 +181,12 @@ async def show_results(update, ctx, msg):
     total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start = page * ITEMS_PER_PAGE
     
-    # Caption with all info
-    caption = f"🔍 *{title}*\n\n📊 {len(items)} results | "
+    # Caption
+    idx_name = filter_idx if filter_idx else "All"
+    caption = f"🔍 *{title}*\n"
+    caption += f"📊 {len(items)} | {idx_name} | "
     caption += "🆕 New" if sort == "newest" else "👤 Top"
-    caption += f" | Page {page+1}/{total}\n\n"
+    caption += f" | {page+1}/{total}\n\n"
     
     kb = []
     for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
@@ -189,11 +200,11 @@ async def show_results(update, ctx, msg):
         seeders = t.get('Seeders', '0')
         name = t.get('Title', '?')
         
-        # Add to caption
-        caption += f"{start+i+1}. *{idx_short}* {size} 👤{seeders}\n{name[:60]}\n\n"
+        num = start + i + 1
+        caption += f"{num}. [{idx_short}] {size} 👤{seeders}\n{name[:55]}\nDL: {num}\n\n"
         
-        # Button just says download
-        kb.append([InlineKeyboardButton(f"⬇️ Download {start+i+1}", callback_data=f"t_{start+i}")])
+        # Simple DL button
+        kb.append([InlineKeyboardButton(f"DL {num}", callback_data=f"t_{start+i}")])
     
     kb.extend(paginate(page, total))
     kb.extend(sort_buttons(sort))
@@ -285,7 +296,7 @@ async def callback_handler(update, ctx):
             t = items[idx]
             magnet = t.get("Magnet", "")
             if magnet and await qbit_add_magnet(magnet):
-                await query.edit_message_text(f"✅ Added!\n\n🎬 {t['Title'][:50]}\n📦 {fmt_size(t.get('Size', '0'))}\n👤 {t.get('Seeders', '0')} seeders", reply_markup=main_menu())
+                await query.edit_message_text(f"✅ Added!\n\n{t['Title'][:50]}\n{fmt_size(t.get('Size', '0'))} | 👤{t.get('Seeders', '0')}", reply_markup=main_menu())
             else:
                 await query.edit_message_text("❌ Failed to add.", reply_markup=main_menu())
     

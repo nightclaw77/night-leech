@@ -53,35 +53,31 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest"):
             try:
                 params = urllib.parse.urlencode({
                     "apikey": JACKETT_API_KEY, 
-                    "t": "search", 
                     "q": query,
-                    "sort": "date" if sort_by == "newest" else "seeders",
-                    "order": "desc",
-                    "limit": 30
+                    "limit": 30,
+                    "sort": "date" if sort_by == "newest" else "seeders"
                 })
-                url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results/torznab/api?{params}"
+                url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results?{params}"
                 
                 async with aiohttp.ClientSession() as s:
                     async with s.get(url, timeout=aiohttp.ClientTimeout(total=30)) as r:
                         if r.status == 200:
-                            text = await r.text()
-                            if '<item>' in text:
-                                root = ET.fromstring(text)
-                                for item in root.findall('.//item'):
-                                    title = item.find('title').text or "?"
-                                    comments = item.find('comments').text or ""
-                                    magnet = comments if comments.startswith('magnet:') else ""
-                                    size_elem = item.find('size')
-                                    seeders_elem = item.find('.//torznab[@name="seeders"]')
-                                    
-                                    results.append({
-                                        "Title": title,
-                                        "Magnet": magnet,
-                                        "Size": size_elem.text if size_elem is not None else "0",
-                                        "Seeders": seeders_elem.get('value', '0') if seeders_elem is not None else '0',
-                                        "Indexer": idx_id,
-                                        "ParsedDate": parse_pubdate(item.find('pubDate').text if item.find('pubDate') is not None else None),
-                                    })
+                            data = await r.json()
+                            items = data.get('Results', [])
+                            for item in items:
+                                title = item.get('Title', '?')
+                                magnet = item.get('Magnet', '') or item.get('Link', '')
+                                if not magnet.startswith('magnet:'):
+                                    magnet = ''
+                                
+                                results.append({
+                                    "Title": title,
+                                    "Magnet": magnet,
+                                    "Size": str(item.get('Size', 0)),
+                                    "Seeders": str(item.get('Seeders', 0)),
+                                    "Indexer": idx_id,
+                                    "ParsedDate": parse_pubdate(item.get('FirstSeen', '')),
+                                })
             except Exception as e:
                 logger.error(f"Jackett {idx_id}: {e}")
         

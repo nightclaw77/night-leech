@@ -46,7 +46,7 @@ def parse_pubdate(pub):
         return datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M:%S") if pub else datetime.min
     except: return datetime.min
 
-async def search_jackett(query, indexer_filter=None, sort_by="seeders"):
+async def search_jackett(query, indexer_filter=None, sort_by="newest"):
     try:
         import urllib.parse
         results = []
@@ -74,7 +74,7 @@ async def search_jackett(query, indexer_filter=None, sort_by="seeders"):
                                     comments = item.find('comments').text or ""
                                     magnet = comments if comments.startswith('magnet:') else ""
                                     size_elem = item.find('size')
-                                    seeders_elem = item.find('.//torznab[@name="seeders"]')
+                                    seeders_elem = item.find('.//torznab[@name="newest"]')
                                     
                                     results.append({
                                         "Title": title,
@@ -88,7 +88,7 @@ async def search_jackett(query, indexer_filter=None, sort_by="seeders"):
                 logger.error(f"Jackett {idx_id}: {e}")
         
         # Sort
-        if sort_by == "seeders":
+        if sort_by == "newest":
             results.sort(key=lambda x: int(x.get("Seeders", 0)), reverse=True)
         else:
             results.sort(key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
@@ -169,7 +169,7 @@ async def show_results(update, ctx, msg):
     title = ctx.user_data.get("search_title", "")
     page = ctx.user_data.get("page", 0)
     filter_idx = ctx.user_data.get("filter_indexer")
-    sort = ctx.user_data.get("sort", "seeders")
+    sort = ctx.user_data.get("sort", "newest")
     
     if not items:
         await msg.edit_text("❌ No results.")
@@ -179,7 +179,7 @@ async def show_results(update, ctx, msg):
     start = page * ITEMS_PER_PAGE
     
     text = f"🔍 *{title}*\n\n📊 {len(items)} results | "
-    text += "👤 Top" if sort == "seeders" else "🆕 New"
+    text += "👤 Top" if sort == "newest" else "🆕 New"
     text += f" | Page {page+1}/{total}\n"
     
     kb = []
@@ -264,7 +264,7 @@ async def callback_handler(update, ctx):
         ctx.user_data["filter_indexer"] = idx
         ctx.user_data["page"] = 0
         title = ctx.user_data.get("search_title", "")
-        sort = ctx.user_data.get("sort", "seeders")
+        sort = ctx.user_data.get("sort", "newest")
         results = await search_jackett(title, idx, sort)
         ctx.user_data["results"] = results
         await show_results(update, ctx, query)
@@ -309,14 +309,14 @@ async def imdb_command(update, ctx):
         return
     msg = await update.message.reply_text(f"🔍 Searching: {search_q}")
     
-    results = await search_jackett(search_q, None, "seeders")
+    results = await search_jackett(search_q, None, "newest")
     
     if results:
         ctx.user_data["results"] = results
         ctx.user_data["search_title"] = search_q
         ctx.user_data["page"] = 0
         ctx.user_data["filter_indexer"] = None
-        ctx.user_data["sort"] = "seeders"
+        ctx.user_data["sort"] = "newest"
         await show_results(update, ctx, msg)
     else:
         await msg.edit_text("❌ No results found.", reply_markup=main_menu())

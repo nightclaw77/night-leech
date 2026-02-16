@@ -24,7 +24,7 @@ INDEXERS = [
     ("iptorrents", "IPT"),
 ]
 
-ITEMS_PER_PAGE = 30
+ITEMS_PER_PAGE = 10
 
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -46,7 +46,7 @@ def parse_pubdate(pub):
         return datetime.strptime(pub[:25], "%a, %d %b %Y %H:%M:%S") if pub else datetime.min
     except: return datetime.min
 
-async def search_jackett(query, indexer_filter=None, sort_by="newest"):
+async def search_jackett(query, indexer_filter=None, sort_by="newest", limit=30):
     try:
         import urllib.parse
         results = []
@@ -59,6 +59,7 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest"):
                     "t": "search", 
                     "q": query,
                     "sort": "date" if sort_by == "newest" else "seeders",
+                    "limit": limit,
                     "order": "desc"
                 })
                 url = f"{JACKETT_URL}/api/v2.0/indexers/{idx_id}/results/torznab/api?{params}"
@@ -309,7 +310,7 @@ async def imdb_command(update, ctx):
         return
     msg = await update.message.reply_text(f"🔍 Searching: {search_q}")
     
-    results = await search_jackett(search_q, None, "newest")
+    results = await search_jackett(search_q, None, "newest", 30)
     
     if results:
         ctx.user_data["results"] = results

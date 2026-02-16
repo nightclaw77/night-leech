@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Night Leech Bot - Simple Download
+Night Leech Bot - Simple & Clean
 """
 
 import os, asyncio, logging, aiohttp, json
@@ -14,11 +14,10 @@ JACKETT_API_KEY = "3kknp1d7trlr6tp95apmcwndu53d0cm9"
 QBITTORRENT_URL = "http://localhost:8083"
 FILE_SERVER_URL = "https://files.nightsub.ir"
 
+# Only TG and IPT - clean results
 INDEXERS = [
-    ("torrentgalaxyclone", "TG"),
-    ("subsplease", "SP"),
-    ("eztv", "EZ"),
-    ("iptorrents", "IPT"),
+    ("torrentgalaxyclone", "🌐 TG"),
+    ("iptorrents", "🔒 IPT"),
 ]
 
 ITEMS_PER_PAGE = 10
@@ -42,7 +41,6 @@ def parse_pubdate(pub):
     try:
         if not pub:
             return datetime.min
-        # Handle ISO format from JSON
         if 'T' in pub:
             return datetime.fromisoformat(pub.replace('Z', '+00:00'))
         return datetime.min
@@ -71,10 +69,8 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest"):
                             items = data.get('Results', [])
                             for item in items:
                                 title = item.get('Title', '?')
-                                # Get magnet
                                 magnet = item.get('Magnet', '')
                                 if not magnet or not magnet.startswith('magnet:'):
-                                    # Try to get from guid
                                     guid = item.get('Guid', '')
                                     if 'magnet:' in str(guid).lower():
                                         magnet = guid
@@ -190,21 +186,18 @@ async def show_results(update, ctx, msg):
     
     kb = []
     for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        idx_short = "🌐"
-        for i_id, i_name in INDEXERS:
-            if i_id == t.get('Indexer'):
-                idx_short = i_name
-                break
+        # Indexer emoji
+        idx_emoji = "🌐" if t.get('Indexer') == 'torrentgalaxyclone' else "🔒"
         
         size = fmt_size(t.get('Size', '0'))
-        seeders = t.get('Seeders', '0')
-        name = t.get('Title', '?')
+        seed = t.get('Seeders', '0')
+        name = t.get('Title', '?')[:55]
         
         num = start + i + 1
-        caption += f"{num}. [{idx_short}] {size} 👤{seeders}\n{name[:55]}\nDL: {num}\n\n"
+        caption += f"{num}. {idx_emoji} {size} 👤{seed}\n{name}\n\n"
         
-        # Simple DL button
-        kb.append([InlineKeyboardButton(f"DL {num}", callback_data=f"t_{start+i}")])
+        # Better button
+        kb.append([InlineKeyboardButton(f"📥 {idx_emoji} {size} 👤{seed}", callback_data=f"t_{start+i}")])
     
     kb.extend(paginate(page, total))
     kb.extend(sort_buttons(sort))

@@ -152,9 +152,11 @@ def main_menu():
 
 def indexer_buttons(current):
     kb = []
+    row = []
     for idx_id, display in INDEXERS:
         prefix = "✅" if current == idx_id else "⬜"
-        kb.append([InlineKeyboardButton(f"{prefix} {display}", callback_data=f"idx_{idx_id}")])
+        row.append(InlineKeyboardButton(f"{prefix} {display}", callback_data=f"idx_{idx_id}"))
+    kb.append(row)
     if current:
         kb.append([InlineKeyboardButton("🔄 All Indexers", callback_data="idx_all")])
     return kb

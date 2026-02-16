@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Night Leech Bot - Simple & Clean
+Night Leech Bot - Professional like HotDog
 """
 
-import os, asyncio, logging, aiohttp, json
+import asyncio, logging, aiohttp, re
 from datetime import datetime
+from collections import defaultdict
+from guessit import guessit
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InlineQueryResultArticle, InputTextMessageContent
 from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, MessageHandler, ContextTypes, filters, InlineQueryHandler
 
@@ -14,7 +16,6 @@ JACKETT_API_KEY = "3kknp1d7trlr6tp95apmcwndu53d0cm9"
 QBITTORRENT_URL = "http://localhost:8083"
 FILE_SERVER_URL = "https://files.nightsub.ir"
 
-# Only TG and IPT - clean results
 INDEXERS = [
     ("torrentgalaxyclone", "🌐 TG"),
     ("iptorrents", "🔒 IPT"),
@@ -37,14 +38,30 @@ def fmt_size(s):
         else: return f"{v/1024:.0f}KB"
     except: return "?"
 
-def parse_pubdate(pub):
+def parse_title_guessit(title):
+    """Parse with guessit"""
     try:
-        if not pub:
-            return datetime.min
-        if 'T' in pub:
-            return datetime.fromisoformat(pub.replace('Z', '+00:00'))
-        return datetime.min
-    except: return datetime.min
+        info = guessit(title)
+    except:
+        info = {}
+    
+    result = {
+        'title': info.get('title', ''),
+        'season': info.get('season'),
+        'episode': info.get('episode'),
+        'year': info.get('year'),
+        'quality': info.get('screen_size', 'Unknown'),
+        'is_tv': info.get('type') == 'episode' or info.get('season') is not None,
+        'is_pack': info.get('episode') is None and info.get('season') is not None,
+    }
+    
+    # Fix quality
+    if result['quality'] == 'Unknown':
+        q = re.search(r'(4K|2160p|1080p|720p|480p)', title, re.I)
+        if q:
+            result['quality'] = q.group(1).upper()
+    
+    return result
 
 async def search_jackett(query, indexer_filter=None, sort_by="newest"):
     try:
@@ -75,22 +92,25 @@ async def search_jackett(query, indexer_filter=None, sort_by="newest"):
                                     if 'magnet:' in str(guid).lower():
                                         magnet = guid
                                 
+                                parsed = parse_title_guessit(title)
+                                
                                 results.append({
                                     "Title": title,
                                     "Magnet": magnet,
                                     "Size": str(item.get('Size', 0)),
                                     "Seeders": str(item.get('Seeders', 0)),
                                     "Indexer": idx_id,
-                                    "ParsedDate": parse_pubdate(item.get('FirstSeen', '')),
+                                    "FirstSeen": item.get('FirstSeen', ''),
+                                    **parsed
                                 })
             except Exception as e:
                 logger.error(f"Jackett {idx_id}: {e}")
         
         # Sort
         if sort_by == "newest":
-            results.sort(key=lambda x: x.get("ParsedDate") or datetime.min, reverse=True)
+            results.sort(key=lambda x: x.get('FirstSeen', ''), reverse=True)
         else:
-            results.sort(key=lambda x: int(x.get("Seeders", 0)), reverse=True)
+            results.sort(key=lambda x: int(x.get('Seeders', 0)), reverse=True)
         
         return results
     except Exception as e:
@@ -174,10 +194,13 @@ async def show_results(update, ctx, msg):
         await msg.edit_text("❌ No results.")
         return
     
+    # Check if TV show
+    tv_items = [x for x in items if x.get('is_tv')]
+    other_items = [x for x in items if not x.get('is_tv')]
+    
     total = (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE
     start = page * ITEMS_PER_PAGE
     
-    # Caption
     idx_name = filter_idx if filter_idx else "All"
     caption = f"🔍 *{title}*\n"
     caption += f"📊 {len(items)} | {idx_name} | "
@@ -185,19 +208,65 @@ async def show_results(update, ctx, msg):
     caption += f" | {page+1}/{total}\n\n"
     
     kb = []
-    for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        # Indexer emoji
-        idx_emoji = "🌐" if t.get('Indexer') == 'torrentgalaxyclone' else "🔒"
+    
+    if tv_items and len(tv_items) >= len(other_items):
+        # Group by quality
+        quality_groups = defaultdict(list)
+        for item in tv_items:
+            q = item.get('quality', 'Unknown')
+            quality_groups[q].append(item)
         
-        size = fmt_size(t.get('Size', '0'))
-        seed = t.get('Seeders', '0')
-        name = t.get('Title', '?')[:55]
+        quality_order = {'2160p': 0, '4K': 0, '1080p': 1, '720p': 2, '480p': 3, 'Unknown': 99}
+        sorted_quals = sorted(quality_groups.keys(), key=lambda x: quality_order.get(x.lower(), 99))
         
-        num = start + i + 1
-        caption += f"{num}. {idx_emoji} {size} 👤{seed}\n{name}\n\n"
+        global_idx = 0
+        display_items = []
         
-        # Better button
-        kb.append([InlineKeyboardButton(f"📥 {idx_emoji} {size} 👤{seed}", callback_data=f"t_{start+i}")])
+        for q in sorted_quals[:5]:
+            group = quality_groups[q]
+            caption += f"📺 *{q}* ({len(group)} results)\n"
+            
+            for t in group[:5]:  # Max 5 per quality
+                idx_emoji = "🌐" if t.get('Indexer') == 'torrentgalaxyclone' else "🔒"
+                size = fmt_size(t.get('Size', '0'))
+                seed = t.get('Seeders', '0')
+                
+                # S/E info
+                s = t.get('season')
+                e = t.get('episode')
+                if s and e:
+                    se_info = f" S{s}E{e}"
+                elif s and t.get('is_pack'):
+                    se_info = f" S{s} Pack"
+                else:
+                    se_info = ""
+                
+                name = t.get('Title', '?')[:50]
+                caption += f"• {idx_emoji} {size} 👤{seed} {se_info}\n{name}\n\n"
+                
+                kb.append([InlineKeyboardButton(f"📥 {q} {size} 👤{seed}", callback_data=f"t_{global_idx}")])
+                display_items.append(t)
+                global_idx += 1
+            
+            if len(group) > 5:
+                caption += f"   +{len(group)-5} more...\n"
+        
+        ctx.user_data["results"] = display_items
+    else:
+        # Show all items
+        display_items = items
+        ctx.user_data["results"] = items
+        
+        for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
+            idx_emoji = "🌐" if t.get('Indexer') == 'torrentgalaxyclone' else "🔒"
+            size = fmt_size(t.get('Size', '0'))
+            seed = t.get('Seeders', '0')
+            name = t.get('Title', '?')[:50]
+            
+            num = start + i + 1
+            caption += f"{num}. {idx_emoji} {size} 👤{seed}\n{name}\n\n"
+            
+            kb.append([InlineKeyboardButton(f"📥 {idx_emoji} {size} 👤{seed}", callback_data=f"t_{start+i}")])
     
     kb.extend(paginate(page, total))
     kb.extend(sort_buttons(sort))
@@ -224,11 +293,11 @@ async def callback_handler(update, ctx):
         if torrents:
             kb = []
             for t in torrents[:10]:
-                name = t.get('name', '?')[:25]
+                name = t.get('name', '?')[:30]
                 progress = t.get('progress', 0) * 100
                 bar = "█" * int(progress/10) + "░" * (10 - int(progress/10))
                 emoji = "⬇️" if t.get('state') in ['downloading', 'stalledDL'] else "✅"
-                kb.append([InlineKeyboardButton(f"{emoji} {name[:20]} {bar} {progress:.0f}%", callback_data=f"dl_{t.get('hash', '')}")])
+                kb.append([InlineKeyboardButton(f"{emoji} {name[:20]}\n{bar} {progress:.0f}%", callback_data=f"dl_{t.get('hash', '')}")])
             kb.extend([[InlineKeyboardButton("🔄 Refresh", callback_data="downloads")], [InlineKeyboardButton("◀️ Back", callback_data="back")]])
             await query.edit_message_text(f"📥 Downloads ({len(torrents)}):", reply_markup=InlineKeyboardMarkup(kb))
         else:

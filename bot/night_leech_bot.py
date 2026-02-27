@@ -62,6 +62,19 @@ _cached_indexers_time: float = 0
 
 import json as json_module
 
+# Variety of emojis for different indexers
+INDEXER_EMOJIS = ['☯️', '☸️', '✡️', '♉', '♓', '♋', '⚛️', '🉑', '🌀', '🔱', '⚜️', '☣️', '🌐', '🔒', '📺']
+
+def get_indexer_emoji_for_id(idx_id: str, is_private: bool = False) -> str:
+    """Get a unique emoji for each indexer"""
+    # Private indexers always get 🔒
+    if is_private:
+        return '🔒'
+    
+    # Assign emoji based on hash of indexer name for consistency
+    idx_hash = hash(idx_id) % len(INDEXER_EMOJIS)
+    return INDEXER_EMOJIS[idx_hash]
+
 def get_indexers_sync() -> list:
     """Read configured indexers from Jackett config files"""
     global _cached_indexers, _cached_indexers_time
@@ -94,7 +107,7 @@ def get_indexers_sync() -> list:
                         if item.get('id') == 'cookieheader' and item.get('value'):
                             is_private = True
                     if is_configured:
-                        emoji = "🔒" if is_private else "🌐"
+                        emoji = get_indexer_emoji_for_id(idx_id, is_private)
                         # Capitalize and format the name
                         name = idx_id.replace('_', ' ').title()
                         indexers.append((idx_id, f"{emoji} {name}"))
@@ -122,13 +135,12 @@ def get_indexer_display_name(idx_id: str, indexers: list) -> str:
     return f"🌐 {idx_id}"
 
 def get_indexer_emoji(idx_id: str, indexers: list) -> str:
-    """Get emoji for indexer"""
+    """Get emoji for indexer - uses the display name from indexers list"""
     display = get_indexer_display_name(idx_id, indexers)
-    if "🔒" in display:
-        return "🔒"
-    elif "📺" in display:
-        return "📺"
-    return "🌐"
+    # Extract emoji from display name (first character if it's an emoji)
+    if display and len(display) > 2:
+        return display[0]
+    return get_indexer_emoji_for_id(idx_id)  # Fallback
 
 ITEMS_PER_PAGE = 10
 

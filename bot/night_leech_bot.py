@@ -130,7 +130,7 @@ def get_indexer_emoji(idx_id: str, indexers: list) -> str:
         return "📺"
     return "🌐"
 
-ITEMS_PER_PAGE = 5
+ITEMS_PER_PAGE = 10
 
 # ─── Logging ─────────────────────────────────────────────────────────────────
 
@@ -693,10 +693,11 @@ async def show_episode_list(update, ctx, msg):
         await msg.edit_text("❌ هیچ قسمتی پیدا نشد.", reply_markup=main_menu())
         return
 
-    # Sort: packs first, then by episode number descending
+    # Sort: packs first, then by episode number descending, then by indexer
     packs = [e for e in episodes if e.get('is_pack')]
     eps   = [e for e in episodes if not e.get('is_pack')]
-    eps.sort(key=lambda x: x.get('episode', 0) or 0, reverse=True)
+    # Sort by episode (desc), then by indexer (asc) for variety
+    eps.sort(key=lambda x: (-(x.get('episode', 0) or 0), x.get('Indexer', '')))
     sorted_episodes = packs + eps
 
     ctx.user_data["episode_list"] = sorted_episodes

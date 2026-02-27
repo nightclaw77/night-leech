@@ -5,7 +5,7 @@ from http.server import HTTPServer, SimpleHTTPRequestHandler
 import os
 
 PORT = 8084
-DIRECTORY = "/root/.openclaw/workspace/Night-Leech/downloads"
+DIRECTORY = "/root/Downloads"
 
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):

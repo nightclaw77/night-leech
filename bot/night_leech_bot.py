@@ -787,18 +787,29 @@ async def show_episode_list(update, ctx, msg):
 
 async def show_movie_list(update, ctx, msg, items: list, title: str, sort: str, filter_: str, page: int):
     """Show flat paginated movie/general results"""
-    total_pages = max(1, (len(items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
+    # Always apply requested two-stage ordering:
+    # 1) newest -> oldest
+    # 2) highest seeders first (stable over stage 1)
+    sorted_items = list(items)
+    sorted_items.sort(key=lambda x: x.get('ParsedDate', datetime.min), reverse=True)
+    def _seeders(v):
+        try:
+            return int(v.get('Seeders', 0) or 0)
+        except:
+            return 0
+    sorted_items.sort(key=_seeders, reverse=True)
+
+    total_pages = max(1, (len(sorted_items) + ITEMS_PER_PAGE - 1) // ITEMS_PER_PAGE)
     page = max(0, min(page, total_pages - 1))
     start = page * ITEMS_PER_PAGE
 
     filter_name = filter_ or "همه"
     caption  = f"🎬 *{escape_md(title)}*\n"
-    caption += f"📊 {len(items)} نتیجه | {filter_name} | "
-    caption += ("✅🆕 جدید" if sort == "newest" else "✅👤 سید بیشتر") + "\n\n"
+    caption += f"📊 {len(sorted_items)} نتیجه | {filter_name} | ✅ ترکیبی (جدید + سیدر)\n\n"
 
     kb = []
     all_indexers = await get_indexers()
-    for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
+    for i, t in enumerate(sorted_items[start:start + ITEMS_PER_PAGE]):
         idx_em  = get_indexer_emoji(t.get('Indexer', ''), all_indexers)
         size    = fmt_size(t.get('Size', '0'))
         seeders = t.get('Seeders', '0')
@@ -834,8 +845,8 @@ async def show_movie_list(update, ctx, msg, items: list, title: str, sort: str, 
     kb.extend(await indexer_buttons(filter_))
     kb.append([InlineKeyboardButton("◀️ برگشت", callback_data="back")])
 
-    # Store flat list for download callbacks
-    ctx.user_data["flat_list"] = items
+    # Store sorted flat list for download callbacks
+    ctx.user_data["flat_list"] = sorted_items
     ctx.user_data["page"] = page
 
     try:

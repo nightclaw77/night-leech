@@ -9,6 +9,7 @@ import logging
 import aiohttp
 import re
 import os
+import time
 import xml.etree.ElementTree as ET
 from datetime import datetime
 from collections import defaultdict
@@ -55,13 +56,57 @@ FILE_SERVER_URL   = cfg.get('FILE_SERVER_URL', 'https://files.nightsub.ir')
 _allowed_raw      = cfg.get('ALLOWED_USERS', '').strip()
 ALLOWED_USERS     = set(int(x) for x in _allowed_raw.split(',') if x.strip().isdigit()) if _allowed_raw else set()
 
-INDEXERS = [
-    ("torrentgalaxyclone", "🌐 TorrentGalaxy"),
-    ("eztv",               "📺 EZTV"),
-    ("subsplease",         "📺 SubsPlease"),
-    ("iptorrents",         "🔒 IPTorrents"),
-    ("limetorrents",       "🌐 LimeTorrents"),
-]
+# Indexers will be fetched dynamically from Jackett
+_cached_indexers: list = []
+_cached_indexers_time: float = 0
+
+async def get_indexers() -> list:
+    """Fetch configured indexers from Jackett API with caching"""
+    global _cached_indexers, _cached_indexers_time
+    
+    # Cache for 60 seconds to avoid hammering Jackett
+    if _cached_indexers and (time.time() - _cached_indexers_time) < 60:
+        return _cached_indexers
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f"{JACKETT_URL}/api/v2.0/indexers?apikey={JACKETT_API_KEY}"
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status == 200:
+                    data = await r.json()
+                    indexers = []
+                    for idx in data:
+                        idx_id = idx.get('id', '')
+                        name = idx.get('name', idx_id)
+                        # Determine emoji based on type
+                        is_private = idx.get('type') == 'private' or idx.get('privacy') == 'private'
+                        emoji = "🔒" if is_private else "🌐"
+                        indexers.append((idx_id, f"{emoji} {name}"))
+                    _cached_indexers = indexers
+                    _cached_indexers_time = time.time()
+                    logger.info(f"Fetched {len(indexers)} indexers from Jackett")
+                    return indexers
+    except Exception as e:
+        logger.error(f"Failed to fetch indexers from Jackett: {e}")
+    
+    # Fallback to cached or empty list
+    return _cached_indexers if _cached_indexers else []
+
+def get_indexer_display_name(idx_id: str, indexers: list) -> str:
+    """Get display name for indexer"""
+    for iid, display in indexers:
+        if iid == idx_id:
+            return display
+    return f"🌐 {idx_id}"
+
+def get_indexer_emoji(idx_id: str, indexers: list) -> str:
+    """Get emoji for indexer"""
+    display = get_indexer_display_name(idx_id, indexers)
+    if "🔒" in display:
+        return "🔒"
+    elif "📺" in display:
+        return "📺"
+    return "🌐"
 
 ITEMS_PER_PAGE = 5
 
@@ -255,7 +300,8 @@ async def search_jackett(query: str, filter_idx: str = None, sort_by: str = "new
     import urllib.parse
 
     results = []
-    indexers = [filter_idx] if filter_idx else [x[0] for x in INDEXERS]
+    all_indexers = await get_indexers()
+    indexers = [filter_idx] if filter_idx else [x[0] for x in all_indexers]
 
     async with aiohttp.ClientSession() as session:
         for idx_id in indexers:
@@ -438,11 +484,12 @@ def sort_buttons(current: str) -> list:
         InlineKeyboardButton(new_label, callback_data="sort_newest"),
     ]]
 
-def indexer_buttons(current: str) -> list:
+async def indexer_buttons(current: str) -> list:
     """Indexer filter buttons"""
     kb = []
     row = []
-    for idx_id, display in INDEXERS:
+    indexers = await get_indexers()
+    for idx_id, display in indexers:
         prefix = "✅ " if current == idx_id else ""
         row.append(InlineKeyboardButton(f"{prefix}{display}", callback_data=f"idx_{idx_id}"))
         if len(row) == 2:
@@ -462,12 +509,6 @@ def paginate_buttons(page: int, total: int, prefix: str = "p") -> list:
     if page < total - 1:
         nav.append(InlineKeyboardButton("▶️", callback_data=f"{prefix}_{page+1}"))
     return [nav] if nav else []
-
-def get_indexer_emoji(idx_id: str) -> str:
-    for iid, display in INDEXERS:
-        if iid == idx_id:
-            return "🔒" if "🔒" in display else "🌐" if "🌐" in display else "📺"
-    return "🌐"
 
 # ─── Authorization ────────────────────────────────────────────────────────────
 
@@ -686,8 +727,9 @@ async def show_movie_list(update, ctx, msg, items: list, title: str, sort: str, 
     caption += ("✅🆕 جدید" if sort == "newest" else "✅👤 سید بیشتر") + "\n\n"
 
     kb = []
+    all_indexers = await get_indexers()
     for i, t in enumerate(items[start:start + ITEMS_PER_PAGE]):
-        idx_em  = get_indexer_emoji(t.get('Indexer', ''))
+        idx_em  = get_indexer_emoji(t.get('Indexer', ''), all_indexers)
         size    = fmt_size(t.get('Size', '0'))
         seeders = t.get('Seeders', '0')
         quality = t.get('quality', '')
@@ -719,7 +761,7 @@ async def show_movie_list(update, ctx, msg, items: list, title: str, sort: str, 
 
     kb.extend(paginate_buttons(page, total_pages))
     kb.extend(sort_buttons(sort))
-    kb.extend(indexer_buttons(filter_))
+    kb.extend(await indexer_buttons(filter_))
     kb.append([InlineKeyboardButton("◀️ برگشت", callback_data="back")])
 
     # Store flat list for download callbacks
@@ -1104,6 +1146,9 @@ async def show_status(msg):
     total_size  = sum(t.get('size', 0) for t in torrents)
     dl_total    = sum(t.get('downloaded', 0) for t in torrents)
 
+    all_indexers = await get_indexers()
+    indexer_names = ', '.join(x[0] for x in all_indexers) if all_indexers else "در حال بارگذاری..."
+    
     text = (
         f"⚙️ *وضعیت ربات*\n\n"
         f"✅ ربات: آنلاین\n"
@@ -1112,7 +1157,7 @@ async def show_status(msg):
         f"⬆️ سیدینگ: {seeding}\n"
         f"💾 حجم کل: {fmt_size(total_size)}\n"
         f"📦 دانلود شده: {fmt_size(dl_total)}\n\n"
-        f"🔍 ایندکسرها: {', '.join(x[0] for x in INDEXERS)}"
+        f"🔍 ایندکسرها: {indexer_names}"
     )
     await msg.edit_message_text(text, parse_mode='Markdown', reply_markup=main_menu())
 

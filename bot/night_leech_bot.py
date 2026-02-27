@@ -725,11 +725,36 @@ async def show_episode_list(update, ctx, msg):
         await msg.edit_text("❌ هیچ قسمتی پیدا نشد.", reply_markup=main_menu())
         return
 
-    # Sort: packs first, then by episode number descending, then by indexer
+    # Sort: packs first, then by hybrid score (newer + more seeders = better)
     packs = [e for e in episodes if e.get('is_pack')]
     eps   = [e for e in episodes if not e.get('is_pack')]
-    # Sort by episode (desc), then by indexer (asc) for variety
-    eps.sort(key=lambda x: (-(x.get('episode', 0) or 0), x.get('Indexer', '')))
+    
+    # Hybrid sort: prioritize newer and higher seeders
+    # Calculate a score: newer date = higher score, more seeders = higher score
+    def hybrid_sort_key(x):
+        # Get parsed date (default to old if missing)
+        parsed_date = x.get('ParsedDate')
+        if parsed_date is None or parsed_date == datetime.min:
+            date_score = 0  # Oldest
+        else:
+            # Convert to timestamp, normalize to 0-100 range
+            import time
+            try:
+                date_score = parsed_date.timestamp()
+            except:
+                date_score = 0
+        
+        # Get seeders (default to 0)
+        try:
+            seeders_score = int(x.get('Seeders', 0))
+        except:
+            seeders_score = 0
+        
+        # Combined score: date is primary (newer first), seeders secondary
+        # Use negative for descending sort
+        return (-date_score, -seeders_score)
+    
+    eps.sort(key=hybrid_sort_key)
     sorted_episodes = packs + eps
 
     ctx.user_data["episode_list"] = sorted_episodes

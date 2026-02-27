@@ -278,7 +278,7 @@ async def search_jackett(query: str, filter_idx: str = None, sort_by: str = "new
                                 title_el = item.find('title')
                                 title = title_el.text if title_el is not None else '?'
 
-                                # Magnet: check comments first, then enclosure
+                                # Magnet: check comments first, then enclosure, then link
                                 magnet = ''
                                 comments_el = item.find('comments')
                                 if comments_el is not None and comments_el.text and comments_el.text.startswith('magnet:'):
@@ -296,6 +296,14 @@ async def search_jackett(query: str, filter_idx: str = None, sort_by: str = "new
                                             url_enc = enc.get('url', '')
                                             if url_enc.startswith('magnet:'):
                                                 magnet = url_enc
+                                            else:
+                                                # Use jackett download link as fallback (qBittorrent can handle .torrent URLs)
+                                                magnet = url_enc
+                                    if not magnet:
+                                        # Try link element
+                                        link_el = item.find('link')
+                                        if link_el is not None and link_el.text:
+                                            magnet = link_el.text
 
                                 pub_el = item.find('pubDate')
                                 pub = pub_el.text if pub_el is not None else ''
@@ -345,6 +353,11 @@ async def search_jackett(query: str, filter_idx: str = None, sort_by: str = "new
                                 guid = item.get('Guid', '')
                                 if str(guid).startswith('magnet:'):
                                     magnet = guid
+                                else:
+                                    # Try Link as fallback
+                                    link = item.get('Link', '')
+                                    if link and link.startswith('http'):
+                                        magnet = link
                             pub = item.get('PublishDate', item.get('FirstSeen', ''))
                             parsed = parse_torrent_title(title)
                             results.append({
@@ -972,12 +985,16 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await show_status(query)
 
 async def _add_torrent(query, torrent_info: dict, magnet: str):
-    """Add a torrent magnet to qBittorrent"""
+    """Add a torrent magnet or .torrent URL to qBittorrent"""
     title   = torrent_info.get('Title', '?')
     size    = fmt_size(torrent_info.get('Size', '0'))
     seeders = torrent_info.get('Seeders', '0')
 
-    if not magnet or not magnet.startswith('magnet:'):
+    # Check if it's a magnet link or a .torrent URL
+    is_magnet = magnet.startswith('magnet:')
+    is_torrent_url = magnet.startswith('http') and ('.torrent' in magnet or '/dl/' in magnet or 'jackett' in magnet)
+    
+    if not magnet or (not is_magnet and not is_torrent_url):
         await query.edit_message_text(
             f"❌ مگنت لینک پیدا نشد!\n\n`{title[:60]}`\n\nاین نتیجه لینک مگنت معتبر ندارد.",
             parse_mode='Markdown', reply_markup=main_menu()

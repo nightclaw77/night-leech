@@ -639,7 +639,14 @@ async def show_season_list(update, ctx, msg, tv_items: list, title: str):
         if 'pack' in eps_set:
             count_text = "🗂 Full Season"
         else:
-            count_text = f"📝 {len(eps_set)} قسمت"
+            # Show episode range if possible
+            numeric_eps = sorted([e for e in eps_set if isinstance(e, int)])
+            if len(numeric_eps) > 1:
+                count_text = f"📝 قسمت {numeric_eps[0]}-{numeric_eps[-1]}"
+            elif len(numeric_eps) == 1:
+                count_text = f"📝 قسمت {numeric_eps[0]}"
+            else:
+                count_text = f"📝 {len(eps_set)} قسمت"
         torrent_count = len(season_items[s])
         text += f"📚 فصل {s} — {count_text} ({torrent_count} فایل)\n"
         kb.append([InlineKeyboardButton(f"📚 فصل {s} ({count_text})", callback_data=f"season_{s}")])
@@ -684,12 +691,14 @@ async def show_quality_list(update, ctx, msg):
 
     for q in sorted_q:
         count = len(qualities[q])
-        # Count unique episodes
-        unique_eps = set()
-        for ep in qualities[q]:
-            if ep.get('episode'):
-                unique_eps.add(ep['episode'])
-        ep_text = f"{len(unique_eps)} قسمت" if unique_eps else f"{count} فایل"
+        # Count unique episodes and show range
+        unique_eps = sorted([ep.get('episode') for ep in qualities[q] if ep.get('episode')])
+        if len(unique_eps) > 1:
+            ep_text = f"قسمت {unique_eps[0]}-{unique_eps[-1]}"
+        elif len(unique_eps) == 1:
+            ep_text = f"قسمت {unique_eps[0]}"
+        else:
+            ep_text = f"{count} فایل"
         text += f"🎬 {q} — {ep_text}\n"
         kb.append([InlineKeyboardButton(f"🎬 {q} ({ep_text})", callback_data=f"quality_{q}")])
 
@@ -1175,7 +1184,7 @@ async def show_torrent_detail(msg, hash_: str):
             video_files = [f for f in files if any(f.get('name','').lower().endswith(ext) for ext in video_exts)]
             target_file = max(video_files, key=lambda f: f.get('size', 0)) if video_files else files[0]
             fn = target_file.get('name', name)
-            info += f"\n\n🔗 [دانلود فایل]({FILE_SERVER_URL}/download/{fn})"
+            info += f"\n\n🔗 [دانلود فایل]({FILE_SERVER_URL}/{fn})"
 
     kb = [
         [InlineKeyboardButton("🗑️ حذف", callback_data=f"del_{hash_}")],

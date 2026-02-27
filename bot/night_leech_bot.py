@@ -60,6 +60,7 @@ INDEXERS = [
     ("eztv",               "📺 EZTV"),
     ("subsplease",         "📺 SubsPlease"),
     ("iptorrents",         "🔒 IPTorrents"),
+    ("limetorrents",       "🌐 LimeTorrents"),
 ]
 
 ITEMS_PER_PAGE = 5

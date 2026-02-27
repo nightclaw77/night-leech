@@ -56,41 +56,63 @@ FILE_SERVER_URL   = cfg.get('FILE_SERVER_URL', 'https://files.nightsub.ir')
 _allowed_raw      = cfg.get('ALLOWED_USERS', '').strip()
 ALLOWED_USERS     = set(int(x) for x in _allowed_raw.split(',') if x.strip().isdigit()) if _allowed_raw else set()
 
-# Indexers will be fetched dynamically from Jackett
+# Indexers will be read from Jackett config files
 _cached_indexers: list = []
 _cached_indexers_time: float = 0
 
-async def get_indexers() -> list:
-    """Fetch configured indexers from Jackett API with caching"""
+import json as json_module
+
+def get_indexers_sync() -> list:
+    """Read configured indexers from Jackett config files"""
     global _cached_indexers, _cached_indexers_time
     
-    # Cache for 60 seconds to avoid hammering Jackett
+    # Cache for 60 seconds
     if _cached_indexers and (time.time() - _cached_indexers_time) < 60:
         return _cached_indexers
     
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"{JACKETT_URL}/api/v2.0/indexers?apikey={JACKETT_API_KEY}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as r:
-                if r.status == 200:
-                    data = await r.json()
-                    indexers = []
-                    for idx in data:
-                        idx_id = idx.get('id', '')
-                        name = idx.get('name', idx_id)
-                        # Determine emoji based on type
-                        is_private = idx.get('type') == 'private' or idx.get('privacy') == 'private'
-                        emoji = "🔒" if is_private else "🌐"
-                        indexers.append((idx_id, f"{emoji} {name}"))
-                    _cached_indexers = indexers
-                    _cached_indexers_time = time.time()
-                    logger.info(f"Fetched {len(indexers)} indexers from Jackett")
-                    return indexers
-    except Exception as e:
-        logger.error(f"Failed to fetch indexers from Jackett: {e}")
+    indexers = []
+    jackett_indexers_path = Path.home() / ".config/Jackett/Indexers"
     
-    # Fallback to cached or empty list
+    try:
+        if jackett_indexers_path.exists():
+            for json_file in sorted(jackett_indexers_path.glob("*.json")):
+                # Skip backup files
+                if json_file.name.endswith('.bak'):
+                    continue
+                idx_id = json_file.stem
+                
+                # Read the config file to get extra info
+                try:
+                    with open(json_file, 'r') as f:
+                        config = json_module.load(f)
+                    # Check if it's configured (has a sitelink value)
+                    is_configured = False
+                    is_private = False
+                    for item in config:
+                        if item.get('id') == 'sitelink' and item.get('value'):
+                            is_configured = True
+                        if item.get('id') == 'cookieheader' and item.get('value'):
+                            is_private = True
+                    if is_configured:
+                        emoji = "🔒" if is_private else "🌐"
+                        # Capitalize and format the name
+                        name = idx_id.replace('_', ' ').title()
+                        indexers.append((idx_id, f"{emoji} {name}"))
+                except:
+                    # If can't read config, just add with default emoji
+                    indexers.append((idx_id, f"🌐 {idx_id}"))
+        
+        _cached_indexers = indexers
+        _cached_indexers_time = time.time()
+        logger.info(f"Read {len(indexers)} indexers from Jackett config files")
+    except Exception as e:
+        logger.error(f"Failed to read indexers from Jackett: {e}")
+    
     return _cached_indexers if _cached_indexers else []
+
+async def get_indexers() -> list:
+    """Async wrapper for get_indexers_sync"""
+    return get_indexers_sync()
 
 def get_indexer_display_name(idx_id: str, indexers: list) -> str:
     """Get display name for indexer"""

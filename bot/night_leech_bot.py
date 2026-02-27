@@ -65,11 +65,19 @@ import json as json_module
 # Variety of emojis for different indexers
 INDEXER_EMOJIS = ['☯️', '☸️', '✡️', '♉', '♓', '♋', '⚛️', '🉑', '🌀', '🔱', '⚜️', '☣️', '🌐', '🔒', '📺']
 
+# Specific emoji mappings for known indexers
+INDEXER_EMOJI_MAP = {
+    'iptorrents': '🔱',
+    'limetorrents': '♋',
+    'nyaasi': '🌀',
+    'torrentgalaxyclone': '🉑',
+}
+
 def get_indexer_emoji_for_id(idx_id: str, is_private: bool = False) -> str:
     """Get a unique emoji for each indexer"""
-    # Private indexers always get 🔒
-    if is_private:
-        return '🔒'
+    # Check for specific mapping first
+    if idx_id.lower() in INDEXER_EMOJI_MAP:
+        return INDEXER_EMOJI_MAP[idx_id.lower()]
     
     # Assign emoji based on hash of indexer name for consistency
     idx_hash = hash(idx_id) % len(INDEXER_EMOJIS)
@@ -720,6 +728,8 @@ async def show_episode_list(update, ctx, msg):
     kb = []
     text = f"📺 *{escape_md(title)}* — S{season} — {quality}\n\n"
 
+    all_indexers = await get_indexers()
+    
     for i, ep in enumerate(sorted_episodes[start:start + ITEMS_PER_PAGE]):
         ep_num  = ep.get('episode')
         size    = fmt_size(ep.get('Size', '0'))
@@ -736,7 +746,8 @@ async def show_episode_list(update, ctx, msg):
         
         # Second row: Info (no action - just display)
         ep_label = f"🗂 Pack" if is_pack else (f"E{ep_num:02d}" if ep_num else "🎬")
-        info_text = f"{ep_label} | 📦 {size} | 👤{seeders} | 🌐 {indexer[:12]}"
+        idx_emoji = get_indexer_emoji(indexer, all_indexers)
+        info_text = f"{ep_label} | 📦 {size} | 👤{seeders} | {idx_emoji} {indexer[:12]}"
         info_btn = InlineKeyboardButton(info_text, callback_data="noop")
         
         kb.append([title_btn])

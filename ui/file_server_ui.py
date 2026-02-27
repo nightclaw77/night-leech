@@ -209,14 +209,11 @@ async def download(request):
         return web.Response(text="File not found", status=404)
     
     filename = os.path.basename(full_path)
-    file_size = os.path.getsize(full_path)
     
-    return web.Response(
-        body=open(full_path, 'rb'),
-        status=200,
+    # FIX: Use web.FileResponse for proper streaming and HTTP Range support
+    return web.FileResponse(
+        path=full_path,
         headers={
-            'Content-Type': 'application/octet-stream',
-            'Content-Length': str(file_size),
             'Content-Disposition': f'attachment; filename="{filename}"'
         }
     )

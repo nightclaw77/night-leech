@@ -634,17 +634,23 @@ async def show_episode_list(update, ctx, msg):
         ep_num  = ep.get('episode')
         size    = fmt_size(ep.get('Size', '0'))
         seeders = ep.get('Seeders', '0')
-        idx_em  = get_indexer_emoji(ep.get('Indexer', ''))
+        indexer = ep.get('Indexer', 'Unknown')
         is_pack = ep.get('is_pack', False)
-
-        if is_pack:
-            label = f"🗂 Full Pack | {size} | 👤{seeders} {idx_em}"
-        elif ep_num:
-            label = f"📝 E{ep_num:02d} | {size} | 👤{seeders} {idx_em}"
-        else:
-            label = f"📝 {ep.get('Title','?')[:30]} | {size} | 👤{seeders}"
-
-        kb.append([InlineKeyboardButton(label, callback_data=f"dl_ep_{start+i}")])
+        full_title = ep.get('Title', '?')
+        
+        # Truncate title to fit button (max ~80 chars for display)
+        display_title = full_title[:75] + "..." if len(full_title) > 78 else full_title
+        
+        # First row: Full title (download action)
+        title_btn = InlineKeyboardButton(display_title, callback_data=f"dl_ep_{start+i}")
+        
+        # Second row: Info (no action - just display)
+        ep_label = f"🗂 Pack" if is_pack else (f"E{ep_num:02d}" if ep_num else "🎬")
+        info_text = f"{ep_label} | 📦 {size} | 👤{seeders} | 🌐 {indexer[:12]}"
+        info_btn = InlineKeyboardButton(info_text, callback_data="noop")
+        
+        kb.append([title_btn])
+        kb.append([info_btn])
 
     kb.extend(paginate_buttons(page, total, "ep"))
     kb.append([InlineKeyboardButton("◀️ برگشت به کیفیت", callback_data="back_quality")])
@@ -847,12 +853,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         items = ctx.user_data.get("results", [])
         title = ctx.user_data.get("search_title", "")
         tv_items = [x for x in items if x.get('is_tv')]
-        await show_season_list(update, ctx, query, tv_items, title)
+        await show_season_list(update, ctx, query.message, tv_items, title)
 
     elif data == "back_quality":
         ctx.user_data["nav_mode"] = "season"
         ctx.user_data["page"] = 0
-        await show_quality_list(update, ctx, query)
+        await show_quality_list(update, ctx, query.message)
 
     elif data == "all_raw":
         ctx.user_data["nav_mode"] = "movie"
@@ -860,7 +866,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         items = ctx.user_data.get("results", [])
         title = ctx.user_data.get("search_title", "")
         sort  = ctx.user_data.get("sort", "newest")
-        await show_movie_list(update, ctx, query, items, title, sort, None, 0)
+        await show_movie_list(update, ctx, query.message, items, title, sort, None, 0)
 
     # ── Season Select ────────────────────────────────────────────
     elif data.startswith("season_"):
@@ -868,7 +874,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["current_season"] = season
         ctx.user_data["nav_mode"] = "season"
         ctx.user_data["page"] = 0
-        await show_quality_list(update, ctx, query)
+        await show_quality_list(update, ctx, query.message)
 
     # ── Quality Select ───────────────────────────────────────────
     elif data.startswith("quality_"):
@@ -876,12 +882,12 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["current_quality"] = quality
         ctx.user_data["nav_mode"] = "quality"
         ctx.user_data["ep_page"] = 0
-        await show_episode_list(update, ctx, query)
+        await show_episode_list(update, ctx, query.message)
 
     # ── Episode pagination ────────────────────────────────────────
     elif data.startswith("ep_"):
         ctx.user_data["ep_page"] = int(data[3:])
-        await show_episode_list(update, ctx, query)
+        await show_episode_list(update, ctx, query.message)
 
     # ── Download Episode ─────────────────────────────────────────
     elif data.startswith("dl_ep_"):
@@ -919,7 +925,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data["results"] = items
         ctx.user_data["nav_mode"] = "movie"
         title = ctx.user_data.get("search_title", "")
-        await show_movie_list(update, ctx, query, items, title, sort, ctx.user_data.get("filter_indexer"), 0)
+        await show_movie_list(update, ctx, query.message, items, title, sort, ctx.user_data.get("filter_indexer"), 0)
 
     # ── Indexer Filter ────────────────────────────────────────────
     elif data.startswith("idx_"):
@@ -932,7 +938,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         all_results = ctx.user_data.get("results", [])
         filtered = [x for x in all_results if x.get('Indexer') == filter_idx] if filter_idx else all_results
         ctx.user_data["nav_mode"] = "movie"
-        await show_movie_list(update, ctx, query, filtered, title, sort, filter_idx, 0)
+        await show_movie_list(update, ctx, query.message, filtered, title, sort, filter_idx, 0)
 
     # ── Pagination ────────────────────────────────────────────────
     elif data.startswith("p_"):
@@ -941,7 +947,7 @@ async def callback_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         title = ctx.user_data.get("search_title", "")
         sort  = ctx.user_data.get("sort", "newest")
         filter_ = ctx.user_data.get("filter_indexer")
-        await show_movie_list(update, ctx, query, items, title, sort, filter_, ctx.user_data["page"])
+        await show_movie_list(update, ctx, query.message, items, title, sort, filter_, ctx.user_data["page"])
 
     # ── Downloads List ────────────────────────────────────────────
     elif data == "downloads":

@@ -725,36 +725,23 @@ async def show_episode_list(update, ctx, msg):
         await msg.edit_text("❌ هیچ قسمتی پیدا نشد.", reply_markup=main_menu())
         return
 
-    # Sort: packs first, then by hybrid score (newer + more seeders = better)
+    # Sort: packs first, then two-stage sort requested by user:
+    # Stage 1) newest -> oldest
+    # Stage 2) highest seeders first (stable over stage 1 result)
     packs = [e for e in episodes if e.get('is_pack')]
     eps   = [e for e in episodes if not e.get('is_pack')]
-    
-    # Hybrid sort: prioritize newer and higher seeders
-    # Calculate a score: newer date = higher score, more seeders = higher score
-    def hybrid_sort_key(x):
-        # Get parsed date (default to old if missing)
-        parsed_date = x.get('ParsedDate')
-        if parsed_date is None or parsed_date == datetime.min:
-            date_score = 0  # Oldest
-        else:
-            # Convert to timestamp, normalize to 0-100 range
-            import time
-            try:
-                date_score = parsed_date.timestamp()
-            except:
-                date_score = 0
-        
-        # Get seeders (default to 0)
+
+    # Stage 1: date (new to old)
+    eps.sort(key=lambda x: x.get('ParsedDate', datetime.min), reverse=True)
+
+    # Stage 2: seeders (high to low), stable sort keeps stage-1 ordering for equal seeders
+    def _seeders(v):
         try:
-            seeders_score = int(x.get('Seeders', 0))
+            return int(v.get('Seeders', 0) or 0)
         except:
-            seeders_score = 0
-        
-        # Combined score: date is primary (newer first), seeders secondary
-        # Use negative for descending sort
-        return (-date_score, -seeders_score)
-    
-    eps.sort(key=hybrid_sort_key)
+            return 0
+    eps.sort(key=_seeders, reverse=True)
+
     sorted_episodes = packs + eps
 
     ctx.user_data["episode_list"] = sorted_episodes

@@ -894,11 +894,21 @@ async def _do_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str)
         clean_query = parts[0].strip()
         imdb_id = parts[1].strip() if len(parts) > 1 else None
     
+    # For better results, search without year if we have IMDB ID
+    # This ensures we get individual episodes, not just packs
+    search_query = clean_query
+    if imdb_id:
+        # Remove year from query for broader search
+        import re
+        search_query = re.sub(r'\s*\(\d{4}\)\s*$', '', clean_query).strip()
+        if search_query != clean_query:
+            logger.info(f"Searching without year: '{search_query}' (original: '{clean_query}')")
+    
     ctx.user_data.clear()
     msg = await update.message.reply_text(f"🔍 در حال جستجو: *{clean_query}*...", parse_mode='Markdown')
 
     try:
-        results = await search_jackett(clean_query, sort_by=ctx.user_data.get("sort", "newest"))
+        results = await search_jackett(search_query, sort_by=ctx.user_data.get("sort", "newest"))
     except Exception as e:
         logger.error(f"Search error: {e}")
         results = []
@@ -912,7 +922,7 @@ async def _do_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str)
         for r in results:
             title_lower = r.get('Title', '').lower()
             # Check if main keywords from query are in the title
-            query_words = set(clean_query.lower().split())
+            query_words = set(clean_query.lower().replace('(', '').replace(')', '').split())
             title_words = set(title_lower.split())
             # Require at least 2 matching words or exact title match
             matches = len(query_words & title_words)

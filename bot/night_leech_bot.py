@@ -498,6 +498,7 @@ async def get_imdb_suggestions(query: str) -> list:
                     d = await r.json(content_type=None)
                     return [
                         {
+                            "id":    x.get("id", ""),  # IMDB ID like tt1234567
                             "title": x.get("l", "?"),
                             "year":  x.get("y", ""),
                             "type":  x.get("q", ""),
@@ -885,18 +886,46 @@ async def imdb_command(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _do_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str):
     """Core search logic used by both /search and /imdb"""
+    # Extract IMDB ID if present (format: "query |imdb:tt1234567")
+    imdb_id = None
+    clean_query = query
+    if "|imdb:" in query:
+        parts = query.split("|imdb:")
+        clean_query = parts[0].strip()
+        imdb_id = parts[1].strip() if len(parts) > 1 else None
+    
     ctx.user_data.clear()
-    msg = await update.message.reply_text(f"🔍 در حال جستجو: *{query}*...", parse_mode='Markdown')
+    msg = await update.message.reply_text(f"🔍 در حال جستجو: *{clean_query}*...", parse_mode='Markdown')
 
     try:
-        results = await search_jackett(query, sort_by=ctx.user_data.get("sort", "newest"))
+        results = await search_jackett(clean_query, sort_by=ctx.user_data.get("sort", "newest"))
     except Exception as e:
         logger.error(f"Search error: {e}")
         results = []
+    
+    # Filter by IMDB ID if available (check if any result has matching IMDB)
+    if imdb_id and results:
+        # Try to find results that might match this IMDB entry
+        # Since Jackett doesn't always return IMDB, we filter by title similarity
+        original_results = results
+        filtered = []
+        for r in results:
+            title_lower = r.get('Title', '').lower()
+            # Check if main keywords from query are in the title
+            query_words = set(clean_query.lower().split())
+            title_words = set(title_lower.split())
+            # Require at least 2 matching words or exact title match
+            matches = len(query_words & title_words)
+            if matches >= 2 or clean_query.lower() in title_lower:
+                filtered.append(r)
+        
+        if filtered:
+            results = filtered
+            logger.info(f"Filtered {len(original_results)} results to {len(filtered)} by IMDB/title match")
 
     if not results:
         await msg.edit_text(
-            f"❌ نتیجه‌ای برای *{query}* پیدا نشد.\n\nممکن است:\n• ایندکسر آنلاین نباشد\n• نام را به انگلیسی تایپ کنید",
+            f"❌ نتیجه‌ای برای *{clean_query}* پیدا نشد.\n\nممکن است:\n• ایندکسر آنلاین نباشد\n• نام را به انگلیسی تایپ کنید",
             parse_mode='Markdown',
             reply_markup=main_menu()
         )
@@ -904,7 +933,7 @@ async def _do_search(update: Update, ctx: ContextTypes.DEFAULT_TYPE, query: str)
 
     ctx.user_data.update({
         "results":       results,
-        "search_title":  query,
+        "search_title":  clean_query,
         "page":          0,
         "sort":          "newest",
         "filter_indexer": None,
@@ -927,13 +956,18 @@ async def inline_query_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     for i, item in enumerate(suggestions):
         year_str = f" ({item['year']})" if item['year'] else ""
         type_emoji = "📺" if item['type'] in ('TV series', 'TV mini-series') else "🎬"
+        imdb_id = item.get('id', '')
+        # Store IMDB ID in the callback data for better search
+        search_text = f"/search {item['title']}{year_str}"
+        if imdb_id:
+            search_text += f" |imdb:{imdb_id}"
         articles.append(InlineQueryResultArticle(
             id=str(i),
             title=f"{type_emoji} {item['title']}{year_str}",
             description="لمس کنید تا جستجو شود",
             thumbnail_url=item.get('poster', '') or None,
             input_message_content=InputTextMessageContent(
-                message_text=f"/search {item['title']}{year_str}"
+                message_text=search_text
             )
         ))
     await update.inline_query.answer(articles, cache_time=300, is_personal=True)

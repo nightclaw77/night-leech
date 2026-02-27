@@ -588,9 +588,11 @@ async def show_results(update: Update, ctx: ContextTypes.DEFAULT_TYPE, msg):
     tv_items    = [x for x in items if x.get('is_tv')]
     movie_items = [x for x in items if not x.get('is_tv')]
 
-    # Determine mode
+    # Determine mode - prioritize TV if any TV items exist and user hasn't chosen
     if nav_mode == "auto":
-        if tv_items and len(tv_items) >= len(movie_items):
+        if tv_items:
+            # If there are TV items, go to TV mode (season selection)
+            # User can always switch to "all results" if needed
             nav_mode = "tv"
             ctx.user_data["nav_mode"] = "tv"
         else:
